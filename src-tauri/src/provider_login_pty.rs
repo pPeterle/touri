@@ -75,6 +75,58 @@ fn copy_flushed(mut input: impl Read, mut output: impl Write) -> io::Result<()> 
     }
 }
 
+// portable-pty requests cursor inheritance. A stdio host has no terminal
+// emulator to answer this query, so ConPTY otherwise waits forever at teardown.
+#[cfg(any(windows, test))]
+fn copy_pty_output(
+    mut input: impl Read,
+    mut output: impl Write,
+    mut reply: impl FnMut() -> io::Result<()>,
+) -> io::Result<()> {
+    const QUERY: &[u8] = b"\x1b[6n";
+    let mut matched = 0;
+    let mut bytes = [0; 8192];
+    loop {
+        let count = input.read(&mut bytes)?;
+        if count == 0 {
+            return Ok(());
+        }
+        for &byte in &bytes[..count] {
+            if byte == QUERY[matched] {
+                matched += 1;
+                if matched == QUERY.len() {
+                    reply()?;
+                    matched = 0;
+                }
+            } else {
+                matched = usize::from(byte == QUERY[0]);
+            }
+        }
+        output.write_all(&bytes[..count])?;
+        output.flush()?;
+    }
+}
+
+#[cfg(windows)]
+struct PtyInput(std::sync::Arc<std::sync::Mutex<Box<dyn Write + Send>>>);
+
+#[cfg(windows)]
+impl Write for PtyInput {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0
+            .lock()
+            .map_err(|_| io::Error::other("PTY input lock"))?
+            .write(bytes)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0
+            .lock()
+            .map_err(|_| io::Error::other("PTY input lock"))?
+            .flush()
+    }
+}
+
 #[cfg(not(windows))]
 fn run(_: Vec<OsString>) -> Result<i32, String> {
     Err("ConPTY is available on Windows; use the platform PTY adapter on this OS".into())
@@ -83,6 +135,7 @@ fn run(_: Vec<OsString>) -> Result<i32, String> {
 #[cfg(windows)]
 fn run(args: Vec<OsString>) -> Result<i32, String> {
     use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+    use std::sync::{Arc, Mutex};
     // Install a job before spawning, so killing the helper also kills descendants.
     // The handle intentionally lives until process exit, including on error paths.
     let job = super::platform::windows_job::own_process_tree().map_err(|e| e.to_string())?;
@@ -96,7 +149,21 @@ fn run(args: Vec<OsString>) -> Result<i32, String> {
         })
         .map_err(|e| e.to_string())?;
     let reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
-    let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
+    let writer = Arc::new(Mutex::new(
+        pair.master.take_writer().map_err(|e| e.to_string())?,
+    ));
+    // Service the output channel before spawning: cursor queries may arrive
+    // during process creation as well as while closing the pseudoconsole.
+    let replies = writer.clone();
+    let output = std::thread::spawn(move || {
+        copy_pty_output(reader, io::stdout().lock(), || {
+            let mut writer = replies
+                .lock()
+                .map_err(|_| io::Error::other("PTY input lock"))?;
+            writer.write_all(b"\x1b[1;1R")?;
+            writer.flush()
+        })
+    });
     let mut command = CommandBuilder::new(&args[0]);
     command.args(&args[1..]);
     command.cwd(std::env::current_dir().map_err(|e| e.to_string())?);
@@ -106,9 +173,8 @@ fn run(args: Vec<OsString>) -> Result<i32, String> {
         .map_err(|e| e.to_string())?;
     drop(pair.slave);
     std::thread::spawn(move || {
-        let _ = copy_flushed(io::stdin().lock(), writer);
+        let _ = copy_flushed(io::stdin().lock(), PtyInput(writer));
     });
-    let output = std::thread::spawn(move || copy_flushed(reader, io::stdout().lock()));
     let status = child.wait().map_err(|e| e.to_string())?;
     // Close the pseudoconsole while the output thread continues draining its pipe.
     drop(pair.master);
@@ -166,5 +232,25 @@ mod tests {
         copy_flushed(bytes, &mut output).unwrap();
         assert_eq!(output.bytes, bytes);
         assert!(output.flushes > 0);
+    }
+
+    #[test]
+    fn cursor_queries_are_answered_across_read_boundaries_without_changing_output() {
+        struct Fragmented<'a>(&'a [u8]);
+        impl Read for Fragmented<'_> {
+            fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+                self.0.read(&mut bytes[..1])
+            }
+        }
+        let text = b"prompt\x1b[6nUTF-8: caf\xc3\xa9\x1b\x1b[6n";
+        let mut output = Vec::new();
+        let mut replies = 0;
+        copy_pty_output(Fragmented(text), &mut output, || {
+            replies += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(output, text);
+        assert_eq!(replies, 2);
     }
 }

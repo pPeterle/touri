@@ -30,7 +30,8 @@ fn conpty_has_a_console_accepts_stdin_and_preserves_exit_status() {
         if Instant::now() > deadline {
             child.kill().unwrap();
             child.wait().unwrap();
-            panic!("ConPTY fixture did not finish");
+            let text = reader.join().unwrap();
+            panic!("ConPTY fixture did not finish; output: {text:?}");
         }
         std::thread::sleep(Duration::from_millis(20));
     };
