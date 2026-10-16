@@ -35,7 +35,14 @@ test("login sessions use the PTY spawn interface and strip desktop capabilities"
   process.env.TOURI_DESKTOP_HELPER = helper
   try {
     expect(
-      spawnProviderLoginPty({ command: "provider.exe", args: [], cwd: "C:\\fixture", platform: "win32", spawn, env: {} }),
+      spawnProviderLoginPty({
+        command: "provider.exe",
+        args: [],
+        cwd: "C:\\fixture",
+        platform: "win32",
+        spawn,
+        env: {},
+      }),
     ).toMatchObject({ success: false, errorCode: "SPAWN_FAILED" })
     expect(received).toBeUndefined()
   } finally {
