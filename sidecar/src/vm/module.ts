@@ -17,11 +17,17 @@ import {
   providerLoginSourceKey,
   readProviderLogin,
 } from "./provider-login"
+import { createProviderLoginFlow } from "./provider-login-flow"
 import { createVmRuntime } from "./runtime"
 import { botWorkspaceRoutes } from "./workspace-routes"
 
 export const name = "vm"
 export const init = async (kernel: Kernel): Promise<void> => {
+  const loginFlow = createProviderLoginFlow({ kernel })
+  kernel.registerRoutes({ name: "provider-login-flow", routes: loginFlow.routes })
+  kernel.onHostNotification((notification) => {
+    if (notification.method === "app.willQuit") loginFlow.dispose()
+  })
   const engine = ociEngine()
   const provider =
     process.platform !== "darwin"

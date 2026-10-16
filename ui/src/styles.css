@@ -4371,3 +4371,14 @@ a {
   gap: var(--space-8);
   margin-top: var(--space-12);
 }
+.provider-login-flow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-8);
+}
+.provider-login-flow > p,
+.provider-login-flow > div {
+  flex-basis: 100%;
+  margin: 0;
+}

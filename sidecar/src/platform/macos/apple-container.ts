@@ -28,6 +28,7 @@ import type {
   VmStatus,
   VmVolumeSpec,
 } from "../../vm/types"
+import { validatedVolumeMounts } from "../../vm/volume-mounts"
 
 type JsonRecord = Record<string, unknown>
 
@@ -326,6 +327,16 @@ export const createAppleContainerProvider = ({
     async create(options): Promise<VmResult<VmConnectionRef>> {
       const validationError = validateCreateOptions({ options })
       if (validationError) return { success: false, errorCode: "INVALID_CONFIG", error: validationError }
+      let volumes: VmVolumeSpec[]
+      try {
+        volumes = validatedVolumeMounts(options.volumes)
+      } catch {
+        return {
+          success: false,
+          errorCode: "INVALID_CONFIG",
+          error: "Pasta de origem ou destino da montagem inválido.",
+        }
+      }
       const botInit = options.entrypoint === "/usr/local/lib/touri/init.sh"
       const args = [
         "create",
@@ -344,7 +355,7 @@ export const createAppleContainerProvider = ({
         ...(options.cwd === undefined ? [] : ["--cwd", options.cwd]),
         ...envArgs(options.env),
         ...portArgs(options.ports),
-        ...volumeArgs(options.volumes),
+        ...volumeArgs(volumes),
         ...(options.dns ?? []).flatMap((server) => ["--dns", server]),
         options.image,
         ...(botInit ? ["-c", BOT_BOOT_COMMAND] : (options.args ?? ["-c", "while :; do sleep 3600; done"])),

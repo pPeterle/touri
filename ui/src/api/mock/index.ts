@@ -63,6 +63,8 @@ const createBot = (input: Seed["bots"][number], index: number, projectId: Id | n
   approvals: "on-request",
   projectId,
   cwd: null,
+  folders: [],
+  anyFolderAccess: false,
   homeDir: `/Users/demo/Library/Application Support/touri/bots/${input.id}`,
   mainThreadId: null,
   browserEnabled: true,
@@ -501,6 +503,8 @@ export const createMockApi = ({ scenario }: { scenario?: MockScenario | null } =
             : ["openai.com", "chatgpt.com"],
       } as unknown as ApiRoutes[typeof route]["res"]
     }
+    if (key === "GET /bots/:id/provider-login/flow" || key === "POST /bots/:id/provider-login/flow")
+      return { provider: (input as { provider: string }).provider, state: "ready" } as ApiRoutes[typeof route]["res"]
     if (key === "GET /bots/:id/provider-login")
       return {
         provider: "claude",
@@ -911,6 +915,7 @@ export const createMockApi = ({ scenario }: { scenario?: MockScenario | null } =
         })),
       } as ApiRoutes[typeof route]["res"]
     if (key === "GET /projects") return { projects } as ApiRoutes[typeof route]["res"]
+    if (key === "GET /projects/discover") return { repositories: [] } as ApiRoutes[typeof route]["res"]
     if (key === "POST /projects") {
       const projectInput = input as ApiRoutes["POST /projects"]["req"]
       const requestedName = projectInput.name?.trim()

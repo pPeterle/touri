@@ -26,6 +26,7 @@ import type {
 } from "@touri/contracts"
 import { validAvatarColor, validAvatarShape } from "@touri/contracts/avatar"
 import { installDoctor } from "../doctor"
+import { parseBotFolders } from "../kernel/bot-folders"
 import { DEFAULT_DATA_RETENTION_DAYS, validDataRetentionDays } from "../kernel/data-maintenance"
 import { SCHEMA_VERSION } from "../kernel/db"
 import {
@@ -66,6 +67,8 @@ type RawBot = {
   access: string
   approvals: string
   project_id: string | null
+  folders_json: string
+  any_folder_access: number
   cwd: string | null
   home_dir: string
   main_thread_id: string | null
@@ -228,6 +231,8 @@ const asBot = (row: RawBot): Bot => ({
       : "workspace-write",
   approvals: row.approvals === "never" ? "never" : "on-request",
   projectId: row.project_id,
+  folders: parseJson<NonNullable<Bot["folders"]>>(row.folders_json, []),
+  anyFolderAccess: row.any_folder_access === 1,
   cwd: row.cwd,
   homeDir: row.home_dir,
   mainThreadId: row.main_thread_id,
@@ -841,6 +846,16 @@ export const init = async (kernel: Kernel): Promise<void> => {
       return { input: null, error: "access is invalid" }
     if (input.approvals !== undefined && input.approvals !== "never" && input.approvals !== "on-request")
       return { input: null, error: "approvals is invalid" }
+    if (body.anyFolderAccess !== undefined && typeof body.anyFolderAccess !== "boolean")
+      return { input: null, error: "anyFolderAccess must be a boolean" }
+    input.anyFolderAccess = (body.anyFolderAccess as boolean | undefined) ?? existing?.anyFolderAccess ?? false
+    try {
+      input.folders = body.folders === undefined ? (existing?.folders ?? []) : parseBotFolders(body.folders)
+    } catch (error) {
+      return { input: null, error: error instanceof Error ? error.message : String(error) }
+    }
+    if (input.machine === "cloud" && (input.anyFolderAccess || input.folders.length))
+      return { input: null, error: "Pastas deste Mac não estão disponíveis na nuvem." }
     if (input.cwd !== undefined && input.cwd !== null && !isAbsolute(input.cwd))
       return { input: null, error: "cwd must be absolute" }
     return { input, error: null }
@@ -894,6 +909,9 @@ export const init = async (kernel: Kernel): Promise<void> => {
         input.machine === "cloud" ? 1 : 0,
         id,
       )
+    database
+      .query("UPDATE bots SET folders_json = ?, any_folder_access = ? WHERE id = ?")
+      .run(JSON.stringify(input.folders ?? []), input.anyFolderAccess ? 1 : 0, id)
     database
       .query(
         "INSERT INTO threads (id, bot_id, parent_thread_id, kind, title, active_leaf_id, routine_run_id, cwd_override, unread, carryover_note, usage_json, source, created_at, updated_at, archived_at) VALUES (?, ?, NULL, 'main', ?, NULL, NULL, NULL, 0, NULL, ?, 'local', ?, ?, NULL)",
@@ -977,6 +995,9 @@ export const init = async (kernel: Kernel): Promise<void> => {
         input.machine === "cloud" ? 1 : 0,
         bot.id,
       )
+    database
+      .query("UPDATE bots SET folders_json = ?, any_folder_access = ? WHERE id = ?")
+      .run(JSON.stringify(input.folders ?? []), input.anyFolderAccess ? 1 : 0, bot.id)
     ensureBotHome({ botId: bot.id, instructions })
     const updated = getBot({ botId: bot.id })
     if (updated) kernel.publish({ type: "bot.updated", bot: updated })

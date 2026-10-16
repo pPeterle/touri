@@ -282,15 +282,14 @@ describe("r4 workflow polish", () => {
       reasoningEffort: "high",
     } as Bot
     const original = api.request
-    api.request = ((route, input, path) =>
-      route === "GET /bots/:id/provider-login"
-        ? Promise.resolve({
-            provider: "claude",
-            ready: false,
-            source: "missing",
-            message: "Claude não está conectado nesta máquina",
-          })
-        : original(route, input, path)) as ApiRequest
+    const request = vi.fn((route, input, path) =>
+      route === "GET /bots/:id/provider-login/flow"
+        ? Promise.resolve({ provider: input.provider, state: "idle" })
+        : route === "POST /bots/:id/provider-login/flow"
+          ? Promise.resolve({ provider: input.provider, state: "waiting" })
+          : original(route, input, path),
+    )
+    api.request = request as ApiRequest
     render(
       <BotSettingsModal
         bot={bot}
@@ -301,16 +300,18 @@ describe("r4 workflow polish", () => {
         onClose={vi.fn()}
       />,
     )
-    fireEvent.click(screen.getByRole("tab", { name: "Computador" }))
-    await screen.findByText("Claude não está conectado nesta máquina")
-    fireEvent.click(screen.getByRole("tab", { name: "Geral" }))
+    await screen.findByText("Aguardando login no navegador…")
     fireEvent.change(screen.getByLabelText("Provedor"), { target: { value: "codex" } })
     expect(screen.getByLabelText("Modelo")).toHaveValue("")
     expect(screen.getByLabelText("Raciocínio")).toHaveValue("")
-    expect(screen.queryByText("Claude não está conectado nesta máquina")).toBeNull()
-    fireEvent.click(screen.getByRole("tab", { name: "Computador" }))
-    await screen.findByText(/Salve o provedor Codex/)
-    expect(screen.getByRole("button", { name: "Entrar no Codex nesta máquina" })).toBeDisabled()
+    await waitFor(() =>
+      expect(request).toHaveBeenCalledWith(
+        "POST /bots/:id/provider-login/flow",
+        { provider: "codex", action: "start" },
+        { id: bot.id },
+      ),
+    )
+    expect(screen.getByRole("button", { name: "Cancelar login" })).toBeEnabled()
   })
 
   it("opens Logs with the only process already selected", async () => {

@@ -39,6 +39,14 @@ test("0012 upgrades a copy of a populated schema 11 database, preserving rows, i
         .all() as Array<{ name: string }>
     ).map((row) => row.name)
     const before = new Map(tables.map((table) => [table, db.query(`SELECT * FROM ${table} ORDER BY 1`).all()]))
+    for (const [table, defaults] of [
+      ["bots", { folders_json: "[]", any_folder_access: 0 }],
+      ["bot_machines", { folder_fingerprint: "" }],
+    ] as const)
+      before.set(
+        table,
+        (before.get(table) ?? []).map((row) => ({ ...(row as object), ...defaults })),
+      )
     const fks = new Map(tables.map((table) => [table, db.query(`PRAGMA foreign_key_list(${table})`).all()]))
     db.close()
     copyFileSync(original, filename)

@@ -115,6 +115,7 @@ describe("composer island", () => {
         }),
     )
     const { box } = setup({ draft: "Primeira mensagem", send })
+    await waitFor(() => expect(screen.getByRole("button", { name: "Enviar" })).toBeEnabled())
     fireEvent.keyDown(box, { key: "Enter" })
     fireEvent.keyDown(box, { key: "Enter" })
     expect(send).toHaveBeenCalledOnce()
@@ -126,6 +127,7 @@ describe("composer island", () => {
   it("preserves the draft on failure and allows retry", async () => {
     const send = vi.fn().mockRejectedValueOnce(new Error("Sem conexão")).mockResolvedValueOnce(undefined)
     const { box } = setup({ draft: "Não perder este texto", send })
+    await waitFor(() => expect(screen.getByRole("button", { name: "Enviar" })).toBeEnabled())
     fireEvent.click(screen.getByRole("button", { name: "Enviar" }))
     await screen.findByRole("alert")
     expect(box).toHaveValue("Não perder este texto")

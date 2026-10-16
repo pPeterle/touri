@@ -2438,3 +2438,44 @@ for (const provider of ["claude", "codex"] as const) {
     expect(turn.env).toMatchObject({ DISABLE_TELEMETRY: "1" })
   })
 }
+
+test("folder changes keep an active VM intact and recreate it with the same workspace on the next turn", async () => {
+  const f = await fixture()
+  const bot = await f.bot()
+  const folder = join(f.root, "grant")
+  mkdirSync(folder)
+  const release = await f.vm.service.acquire({ botId: bot.id })
+  const initial = [...f.fake.configs.values()][0]
+  const workspace = initial?.volumes?.find((mount) => mount.target === "/workspace")
+  const response = await f.request(
+    `/bots/${bot.id}`,
+    { folders: [{ path: folder, access: "read-only" }], anyFolderAccess: true },
+    "PATCH",
+  )
+  expect(response.status).toBe(200)
+  expect(f.fake.calls.filter((call) => call.action === "destroy")).toHaveLength(0)
+  await release()
+  await f.vm.service.intent({ botId: bot.id, intent: "computer-open" })
+  expect(f.fake.calls.filter((call) => call.action === "destroy")).toHaveLength(0)
+  const next = await f.vm.service.prepareTurn({
+    botId: bot.id,
+    threadId: bot.mainThreadId ?? "thread",
+    token: "test-folders",
+  })
+  const updated = [...f.fake.configs.values()][0]
+  expect(f.fake.calls.filter((call) => call.action === "destroy")).toHaveLength(1)
+  expect(updated?.volumes).toContainEqual(workspace)
+  expect(updated?.volumes?.some((mount) => mount.target.startsWith("/host/grant-") && mount.readOnly)).toBe(true)
+  expect(updated?.volumes?.some((mount) => mount.target === "/host/home" && !mount.readOnly)).toBe(true)
+  await next.release()
+  const removed = await f.request(`/bots/${bot.id}`, { folders: [], anyFolderAccess: false }, "PATCH")
+  expect(removed.status).toBe(200)
+  const third = await f.vm.service.prepareTurn({
+    botId: bot.id,
+    threadId: bot.mainThreadId ?? "thread",
+    token: "test-removed",
+  })
+  expect([...f.fake.configs.values()][0]?.volumes?.some((mount) => mount.target.startsWith("/host/"))).toBe(false)
+  expect([...f.fake.configs.values()][0]?.volumes).toContainEqual(workspace)
+  await third.release()
+})

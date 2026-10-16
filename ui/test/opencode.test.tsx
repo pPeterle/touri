@@ -29,6 +29,7 @@ it("creates an OpenCode bot with a provider/model ID and approval mode in Portug
         access: "workspace-write",
         approvals: "on-request",
       }),
+      expect.stringMatching(/^draft-/),
     ),
   )
 })

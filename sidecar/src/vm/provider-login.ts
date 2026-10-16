@@ -7,6 +7,16 @@ import { withDeadline } from "../kernel/policy"
 
 export const providerLoginAccount = (botId: string, provider: Bot["provider"]): string =>
   `bot/${botId}/${provider}-vm-login`
+export const redactProviderLogin = (kernel: Kernel, value: string) => {
+  kernel.addRedactionValue(value)
+  try {
+    const walk = (item: unknown) => {
+      if (typeof item === "string" && item.length >= 6) kernel.addRedactionValue(item)
+      else if (item && typeof item === "object") for (const child of Object.values(item)) walk(child)
+    }
+    walk(JSON.parse(value))
+  } catch {}
+}
 export const providerLoginSourceKey = (bot: Pick<Bot, "id" | "provider">) => `vm-login-source:${bot.id}:${bot.provider}`
 export type ProviderLoginSource = "vault" | "host-file"
 /** Keep vault failures within the HTTP request's idle timeout so the route can explain how to recover. */
@@ -48,7 +58,7 @@ export class ProviderLoginError extends Error {
   }
 }
 
-const readHostLoginFile = (hostHome: string, target: LoginTarget): string => {
+export const readHostLoginFile = (hostHome: string, target: LoginTarget): string => {
   if (process.platform === "win32") {
     const root = join(hostHome, target.directory)
     return readBoundedFile({ root, path: join(root, target.file), maxBytes: 20000 }).toString("utf8")

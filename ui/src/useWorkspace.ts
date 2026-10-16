@@ -75,7 +75,7 @@ export type WorkspaceActions = {
   updateBot: (botId: Id, patch: Partial<ApiRoutes["PATCH /bots/:id"]["req"]>) => Promise<void>
   deleteBot: (botId: Id, name: string, deleteVolumes: boolean) => Promise<void>
   machineAction: (botId: Id, reset: boolean, projectId?: Id | null, stopTurns?: boolean) => Promise<void>
-  createBot: (input: ApiRoutes["POST /bots"]["req"]) => Promise<void>
+  createBot: (input: ApiRoutes["POST /bots"]["req"], loginDraftId?: string) => Promise<void>
   toggleRoutine: (routine: Routine) => Promise<void>
   runRoutine: (routineId: Id) => Promise<void>
   createRoutine: (input: ApiRoutes["POST /routines"]["req"]) => Promise<void>
@@ -302,6 +302,7 @@ const lastActiveThread = (threads: Thread[], runs: Run[], botId: Id, rememberedI
 }
 
 export const useWorkspace = (api: UiApi, enabled = true): Workspace => {
+  const createdLoginDrafts = useRef(new Map<string, Bot>())
   const diagnosis = useDoctorReport(api, enabled)
   const [data, setData] = useState<WorkspaceData>(emptyState)
   useMachineParking(api, data.bots, enabled && !data.loading)
@@ -760,8 +761,17 @@ export const useWorkspace = (api: UiApi, enabled = true): Workspace => {
   )
 
   const createBot = useCallback(
-    async (input: ApiRoutes["POST /bots"]["req"]): Promise<void> => {
-      const response = await api.request("POST /bots", input)
+    async (input: ApiRoutes["POST /bots"]["req"], loginDraftId?: string): Promise<void> => {
+      const created = loginDraftId ? createdLoginDrafts.current.get(loginDraftId) : undefined
+      const response = created ? { bot: created } : await api.request("POST /bots", input)
+      if (loginDraftId) createdLoginDrafts.current.set(loginDraftId, response.bot)
+      if (loginDraftId)
+        await api.request(
+          "POST /bots/:id/provider-login/flow",
+          { provider: input.provider, action: "adopt", draftId: loginDraftId },
+          { id: response.bot.id },
+        )
+      if (loginDraftId) createdLoginDrafts.current.delete(loginDraftId)
       setData((current) => ({
         ...current,
         bots: uniqueById([...current.bots, response.bot]),

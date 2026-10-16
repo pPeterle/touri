@@ -46,6 +46,8 @@ export type Result<T, C extends string = string> = Ok<T> | Err<C>
 /* Domain rows (camelCase mirror of schema.sql)                                                */
 /* ------------------------------------------------------------------------------------------ */
 
+export type DiscoveredProject = { path: AbsolutePath; name: string; lastModified: number }
+
 export type Project = {
   id: Id
   name: string
@@ -78,7 +80,12 @@ export type StandingGrant = { id: Id; botId: Id; scope: ApprovalScope; grantedAt
 export type ApprovalInput = { ctx: Pick<ToolContext, 'botId' | 'threadId' | 'runId' | 'signal'>; scope: ApprovalScope; toolName: string; input: unknown; toolUseId?: string; allowStanding?: boolean; isCurrent?: () => boolean }
 export type ApprovalResult = Result<{ behavior: 'allow' | 'deny'; updatedInput?: unknown; message?: string }, 'NOT_FOUND' | 'TIMEOUT' | 'DENIED'>
 
+export type BotFolder = { path: AbsolutePath; access: 'read-only' | 'read-write' }
+
 export type Bot = {
+  /** Defaults for bots created before schema 16: [] and false. */
+  folders?: Array<BotFolder>
+  anyFolderAccess?: boolean
   mcpServers?: Array<McpServer>
 
   id: Id
@@ -636,7 +643,18 @@ export type ProviderAdapter = {
 /* ------------------------------------------------------------------------------------------ */
 
 export type CreateBotInput = { cloudApiKey?: string } & Pick<Bot, 'name' | 'provider'> &
-  Partial<Pick<Bot, 'title' | 'roleLine' | 'description' | 'color' | 'avatarShape' | 'avatarSeed' | 'instructions' | 'model' | 'reasoningEffort' | 'access' | 'approvals' | 'projectId' | 'cwd' | 'browserEnabled' | 'computerUse' | 'machine' | 'machineIdleMinutes' | 'vmProviderLogin' | 'hostComputerUse'>>
+  Partial<Pick<Bot, 'title' | 'roleLine' | 'description' | 'color' | 'avatarShape' | 'avatarSeed' | 'instructions' | 'model' | 'reasoningEffort' | 'access' | 'approvals' | 'projectId' | 'cwd' | 'browserEnabled' | 'computerUse' | 'machine' | 'machineIdleMinutes' | 'vmProviderLogin' | 'hostComputerUse' | 'folders' | 'anyFolderAccess'>>
+
+export type ProviderLoginFlow = {
+  provider: Provider
+  state: 'idle' | 'host-available' | 'waiting' | 'ready' | 'cancelled' | 'error'
+  deviceCode?: string
+  verificationUrl?: string
+  needsCode?: boolean
+  codeError?: string
+  prompt?: { kind: 'provider' | 'method'; choice: string }
+  message?: string
+}
 
 export type SendMessageInput = {
   clientNonce?: string
@@ -693,6 +711,8 @@ export type ApiRoutes = {
   }
   'PUT /bots/:id/provider-login': { req: { value?: string; source?: 'vault' | 'host-file' }; res: {} }
   'DELETE /bots/:id/provider-login': { req: {}; res: {} }
+  'GET /bots/:id/provider-login/flow': { req: { provider: Provider }; res: ProviderLoginFlow }
+  'POST /bots/:id/provider-login/flow': { req: { provider: Provider; action: 'start' | 'cancel' | 'use-host' | 'paste' | 'adopt' | 'input' | 'code'; value?: string; draftId?: string; input?: 'up' | 'down' | 'enter' }; res: ProviderLoginFlow }
   'GET /machines': { req: {}; res: { capability: MachineCapability; machines: Array<MachineState> } }
   'POST /machines/service/start': { req: { botId?: Id }; res: { machine: MachineState | null } }
   'POST /bots/:id/machine/stop': { req: {}; res: { machine: MachineState } }
@@ -732,6 +752,7 @@ export type ApiRoutes = {
     res: { server: { name: string; version: string }; tools: Array<{ name: string; description: string; group: string }> }
   }
   'GET /projects': { req: {}; res: { projects: Array<Project> } }
+  'GET /projects/discover': { req: {}; res: { repositories: Array<DiscoveredProject> } }
   'POST /projects': {
     req: { path: AbsolutePath; name?: string } | { gitUrl: string; parentDir: AbsolutePath; name?: string }
     res: { project: Project }

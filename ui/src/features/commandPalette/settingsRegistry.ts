@@ -241,7 +241,7 @@ export const SETTINGS = {
   providerLogin: setting({
     id: "providerLogin",
     scope: "bot",
-    section: "computer",
+    section: "general",
     label: "Login do provedor",
     description: "Salve o login do Codex ou do Claude para o computador deste bot.",
     keywords: ["login", "codex", "claude", "token", "oauth", "conta"],

@@ -9,7 +9,8 @@ import { machineConnection } from "../vm/connection"
 import { BOT_BOOT_COMMAND, CANCEL_VM_PROCESS_COMMAND, VM_PROCESS_COMMAND } from "../vm/guest-process"
 import { BOT_IMAGE, imageContext } from "../vm/image"
 import { createPrivateForwarding } from "../vm/private-forwarding"
-import type { VmExecOptions, VmProvider, VmResult } from "../vm/types"
+import type { VmExecOptions, VmProvider, VmResult, VmVolumeSpec } from "../vm/types"
+import { validatedVolumeMounts } from "../vm/volume-mounts"
 import { probeOciService, WINDOWS_VM_FIX } from "./oci-health"
 
 export type OciEngine = "podman" | "docker"
@@ -119,6 +120,16 @@ export const createOciProvider = ({
           errorCode: "INVALID_CONFIG",
           error: "Invalid container configuration; use private forwarding, never published ports",
         }
+      let volumes: VmVolumeSpec[]
+      try {
+        volumes = validatedVolumeMounts(options.volumes, { platform, managedOnly: true })
+      } catch {
+        return {
+          success: false,
+          errorCode: "INVALID_CONFIG",
+          error: "Invalid volume path or host folder changed after validation",
+        }
+      }
       const botInit = options.entrypoint === "/usr/local/lib/touri/init.sh"
       const result = await command(
         [
@@ -138,7 +149,7 @@ export const createOciProvider = ({
           ...(options.memoryMb === undefined ? [] : ["--memory", `${options.memoryMb}M`]),
           ...(options.cwd ? ["--workdir", options.cwd] : []),
           ...envArgs(options.env),
-          ...(options.volumes ?? []).flatMap((v) => [
+          ...volumes.flatMap((v) => [
             "--mount",
             `type=${v.type ?? "bind"},source=${v.source},target=${v.target}${v.readOnly ? ",readonly" : ""}`,
           ]),

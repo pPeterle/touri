@@ -209,13 +209,13 @@ it("does not open over another dialog", async () => {
   expect(screen.queryByRole("dialog", { name: DIALOG })).toBeNull()
 })
 
-it("opens bot-scoped settings such as the provider login on the bot's Computer tab", async () => {
+it("opens provider login beside the provider choice on the bot's General tab", async () => {
   await start()
   const input = search("login do provedor")
   expect(activeOption(input)).toHaveTextContent(SETTINGS.providerLogin.label)
   fireEvent.keyDown(input, { key: "Enter" })
   const dialog = await screen.findByRole("dialog", { name: "Configurações de mark" })
-  expect(within(dialog).getByRole("tab", { name: "Computador" })).toHaveAttribute("aria-selected", "true")
+  expect(within(dialog).getByRole("tab", { name: "Geral" })).toHaveAttribute("aria-selected", "true")
 })
 
 it("keeps results bounded with hundreds of bots and threads", () => {

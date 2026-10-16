@@ -81,6 +81,8 @@ test("0014 upgrades a copy of a populated schema 13 database with old-label rows
   const filename = join(root, "upgraded.db")
   let db = new Database(original)
   try {
+    // Bun versions differ in their connection default; rebuilds must restore it.
+    const alterTableDefault = db.query("PRAGMA legacy_alter_table").get()
     await buildSchema13(db)
     seed(db)
     expect(() => db.exec("UPDATE bots SET source='legacy' WHERE id='b-old'")).toThrow()
@@ -95,6 +97,14 @@ test("0014 upgrades a copy of a populated schema 13 database with old-label rows
         .all() as Array<{ name: string }>
     ).map((row) => row.name)
     const before = snapshot(db, tables)
+    for (const [table, defaults] of [
+      ["bots", { folders_json: "[]", any_folder_access: 0 }],
+      ["bot_machines", { folder_fingerprint: "" }],
+    ] as const)
+      before.rows.set(
+        table,
+        (before.rows.get(table) ?? []).map((row) => ({ ...(row as object), ...defaults })),
+      )
     const objectsBefore = db
       .query(
         "SELECT name FROM sqlite_schema WHERE type IN ('index','trigger','view') AND name NOT LIKE 'sqlite_%' ORDER BY name",
@@ -103,7 +113,7 @@ test("0014 upgrades a copy of a populated schema 13 database with old-label rows
     db.close()
     copyFileSync(original, filename)
     db = openDatabase({ filename })
-    expect(db.query("PRAGMA legacy_alter_table").get()).toEqual({ legacy_alter_table: 0 })
+    expect(db.query("PRAGMA legacy_alter_table").get()).toEqual(alterTableDefault)
     for (let reopen = 0; reopen < 2; reopen++) {
       const after = snapshot(db, tables)
       expect(after.rows).toEqual(before.rows)

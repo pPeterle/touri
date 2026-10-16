@@ -32,6 +32,7 @@ import { buildChildEnv } from "../kernel"
 import { redactStructured } from "../kernel/redact"
 import { attachedServers, resolveAttachedMcp } from "../mcp/attached"
 import { reapOrphanShims } from "../mcp/shim-registry"
+import { prepareLocalProviderLogin } from "../vm/local-provider-login"
 import { ProviderLoginError } from "../vm/provider-login"
 import { redactVmEvents } from "../vm/redact-events"
 import { MachineServiceError } from "../vm/service-error"
@@ -788,7 +789,13 @@ export const createRuntimeEngine = ({
     const result = await (async (): Promise<Awaited<ReturnType<ProviderAdapter["startTurn"]>>> => {
       let prepared: Awaited<ReturnType<import("@touri/contracts").VmRuntime["prepareTurn"]>> | undefined
       let flushEvents: (() => void) | undefined
+      let releaseLogin: (() => void) | undefined
       try {
+        if (bot.machine !== "vm" && bot.machine !== "cloud") {
+          const login = await prepareLocalProviderLogin(kernel, bot, controller.signal)
+          Object.assign(env, login.env)
+          releaseLogin = login.release
+        }
         if (bot.machine === "vm") {
           const vm = kernel.services.use("vm.runtime")
           if (!vm) return { success: false, errorCode: "cli_crash", error: "VM runtime indisponível" }
@@ -902,6 +909,7 @@ export const createRuntimeEngine = ({
       } finally {
         flushEvents?.()
         await prepared?.release()
+        releaseLogin?.()
         if (deadline) clearTimeout(deadline)
       }
     })()

@@ -198,7 +198,7 @@ describe("r3 P2 chat and navigation", () => {
 })
 
 describe("r3 login and MCP settings", () => {
-  it("P1-3 login recovery opens permissions and disappears after the next successful reply", () => {
+  it("P1-3 login recovery opens permissions and disappears after the next successful reply", async () => {
     const props = chatProps()
     const onOpenPermissions = vi.fn()
     const failed = message("failed-login", null, "", {
@@ -206,7 +206,7 @@ describe("r3 login and MCP settings", () => {
       parts: [{ type: "notice", code: "run_failed", level: "error", text: "cli_auth: login ausente" }],
     })
     const view = render(<ChatPanel {...props} messages={[failed]} onOpenPermissions={onOpenPermissions} />)
-    fireEvent.click(screen.getByRole("button", { name: "Entrar no Codex nesta máquina" }))
+    fireEvent.click(await screen.findByRole("button", { name: "Entrar no Codex nesta máquina" }))
     expect(onOpenPermissions).toHaveBeenCalledOnce()
     view.rerender(
       <ChatPanel
@@ -233,22 +233,26 @@ describe("r3 login and MCP settings", () => {
         onOpenProviderLogin={onOpenProviderLogin}
       />,
     )
-    fireEvent.click(screen.getByRole("button", { name: "Entrar no Codex nesta máquina" }))
+    fireEvent.click(await screen.findByRole("button", { name: "Entrar no Codex nesta máquina" }))
     expect(onOpenProviderLogin).toHaveBeenCalledOnce()
     expect(onOpenPermissions).not.toHaveBeenCalled()
   })
   it("the provider-login row is reachable through the settings registry focus mechanism", async () => {
     const { api } = fixture()
-    const request: ApiRequest = vi.fn(async () => ({
-      provider: "codex",
-      ready: false,
-      source: "missing",
-      configuredSource: "host-file",
-      health: "not-found",
-      message: "Codex ainda não está conectado neste bot.",
-    })) as ApiRequest
+    const request: ApiRequest = vi.fn(async (route) =>
+      route === "GET /bots/:id/provider-login/flow"
+        ? { provider: "codex", state: "ready" }
+        : {
+            provider: "codex",
+            ready: false,
+            source: "missing",
+            configuredSource: "host-file",
+            health: "not-found",
+            message: "Codex ainda não está conectado neste bot.",
+          },
+    ) as ApiRequest
     render(<ProviderLogin api={{ ...api, request }} botId="qa-r3" provider="codex" onConfigured={vi.fn()} />)
-    await screen.findByText(/ainda não está conectado/)
+    await waitFor(() => expect(screen.getByLabelText("Fonte do login")).toHaveValue("host-file"))
     const release = focusSetting(SETTINGS.providerLogin.id)
     expect(document.activeElement).toBe(screen.getByLabelText("Fonte do login"))
     expect(screen.getByLabelText("Fonte do login")).toHaveValue("host-file")
@@ -259,22 +263,28 @@ describe("r3 login and MCP settings", () => {
     async (provider) => {
       const { api } = fixture()
       const request: ApiRequest = vi.fn(async (route) =>
-        route === "GET /bots/:id/provider-login"
-          ? { provider, ready: false, source: "missing", message: "Login ausente" }
-          : {},
+        route === "GET /bots/:id/provider-login/flow"
+          ? { provider, state: "cancelled" }
+          : route === "GET /bots/:id/provider-login"
+            ? { provider, ready: false, source: "missing", message: "Login ausente" }
+            : route === "POST /bots/:id/provider-login/flow"
+              ? { provider, state: "ready" }
+              : {},
       ) as ApiRequest
       const configured = vi.fn()
       render(<ProviderLogin api={{ ...api, request }} botId="qa-r3" provider={provider} onConfigured={configured} />)
-      await screen.findByText("Login ausente")
-      fireEvent.click(
-        screen.getByRole("button", { name: `Entrar no ${provider === "claude" ? "Claude" : "Codex"} nesta máquina` }),
-      )
+      await screen.findByText("Login cancelado.")
+      fireEvent.click(screen.getByRole("button", { name: "Colar token manualmente" }))
       const input = screen.getByLabelText(provider === "claude" ? "Token OAuth do Claude" : "Login JSON do Codex")
       expect(input).toHaveAttribute("type", "password")
       fireEvent.change(input, { target: { value: "secret-r3" } })
       fireEvent.click(screen.getByRole("button", { name: "Salvar login no cofre" }))
       await waitFor(() => expect(configured).toHaveBeenCalledOnce())
-      expect(request).toHaveBeenCalledWith("PUT /bots/:id/provider-login", { value: "secret-r3" }, { id: "qa-r3" })
+      expect(request).toHaveBeenCalledWith(
+        "POST /bots/:id/provider-login/flow",
+        { provider, action: "paste", value: "secret-r3" },
+        { id: "qa-r3" },
+      )
       expect(document.querySelector('input[type="password"]')).toBeNull()
       expect(document.body.textContent).not.toContain("secret-r3")
     },

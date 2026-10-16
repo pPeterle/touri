@@ -1,13 +1,18 @@
-import type { Bot, Id, Run } from "@touri/contracts"
-import { type RefObject, useEffect, useId, useLayoutEffect, useRef, useState } from "react"
+import type { Bot, Id, Project, Run } from "@touri/contracts"
+import { type ComponentProps, type RefObject, useEffect, useId, useLayoutEffect, useRef, useState } from "react"
 import type { UiApi } from "../api/client"
 import { composerKeyAction } from "../composerKeys"
 import { userFacingError } from "../errors"
 import { useCloudAccount } from "../features/cloud/useCloudAccount"
 import { dropRejectionMessage, type FileDrop, listenForFileDrops } from "../fileDrops"
+import { t } from "../i18n"
 import { useComposerMachineIntent } from "../machineIntents"
+import { useProviderLogin } from "../useProviderLogin"
 import { useMascotComposer } from "./AvatarRuntime"
 import { BotAvatar } from "./BotAvatar"
+import { ComposerNotice } from "./ComposerNotice"
+import { ComposerProjectChip } from "./ComposerProjectChip"
+import { ProviderLoginFlow } from "./ProviderLoginFlow"
 import { useReveal } from "./Reveal"
 import "./Composer.css"
 
@@ -27,7 +32,12 @@ type ComposerProps = {
   onSend: (text: string, parentId?: Id | null, attachmentIds?: Array<Id>) => Promise<void>
   onCancel: (runId: Id) => Promise<void>
   onOpenModel?: (() => void) | undefined
+  projects?: Project[] | undefined
+  onSelectProject?: ((projectId: Id | null) => Promise<void>) | undefined
+  onAddProject?: (() => void) | undefined
   onOpenPermissions?: (() => void) | undefined
+  onOpenProviderLogin?: (() => void) | undefined
+  notice?: Omit<ComponentProps<typeof ComposerNotice>, "api" | "active" | "loginFlowShown">
 }
 
 /** Focusing a draft can invite the mascot to listen; only the runtime can signal work. */
@@ -81,8 +91,14 @@ export const Composer = ({
   onSend,
   onCancel,
   onOpenModel,
+  projects = [],
+  onSelectProject,
+  onAddProject,
   onOpenPermissions,
+  onOpenProviderLogin,
+  notice,
 }: ComposerProps) => {
+  const login = useProviderLogin(api, bot?.id ?? "", bot?.provider ?? "codex", !!bot && bot.machine !== "cloud")
   const { account: cloudAccount } = useCloudAccount(api, bot?.machine === "cloud")
   const cloudUnavailable = bot?.machine === "cloud" && cloudAccount?.runtimeAvailable !== true
   const [focused, setFocused] = useState(false)
@@ -242,6 +258,7 @@ export const Composer = ({
   const chooseFiles = () => fileInput.current?.click()
   const uploading = files.some((file) => file.status === "loading")
   const blocked =
+    login.blocked ||
     cloudUnavailable ||
     sending ||
     uploading ||
@@ -297,7 +314,7 @@ export const Composer = ({
   const model = groupName ? `${mentionBots.length} membros` : bot?.model || "Padrão do provedor"
   const hasContent = Boolean(draft.trim() || files.length)
   const showStop = Boolean(activeRun && !hasContent && !sending)
-  return (
+  const composer = (
     <form
       ref={island}
       className="composer composer-island"
@@ -350,6 +367,14 @@ export const Composer = ({
         </ul>
       )}
       {cloudUnavailable && <p role="status">Execução na nuvem chega em breve</p>}
+      {login.blocked && (
+        <>
+          <ProviderLoginFlow login={login} />
+          <button type="button" className="text-button" onClick={onOpenProviderLogin ?? onOpenPermissions}>
+            {t("Colar token manualmente")}
+          </button>
+        </>
+      )}
       <textarea
         disabled={cloudUnavailable}
         ref={inputRef}
@@ -468,6 +493,16 @@ export const Composer = ({
             <span className="composer-model-name">{model}</span>
             <span aria-hidden="true">⌄</span>
           </button>
+          {bot && bot.machine !== "cloud" && !groupName && (
+            <ComposerProjectChip
+              key={bot.id}
+              bot={bot}
+              projects={projects}
+              active={Boolean(activeRun)}
+              onSelect={onSelectProject}
+              onAdd={onAddProject}
+            />
+          )}
           <span className="composer-permissions">
             <button
               type="button"
@@ -548,5 +583,11 @@ export const Composer = ({
         </div>
       )}
     </form>
+  )
+  return (
+    <>
+      {notice && <ComposerNotice {...notice} api={api} active={Boolean(activeRun)} loginFlowShown={login.blocked} />}
+      {composer}
+    </>
   )
 }

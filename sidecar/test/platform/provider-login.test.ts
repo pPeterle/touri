@@ -64,3 +64,23 @@ test("PTY adapters preserve provider arguments and require the installed Windows
   }
   expect(providerLoginPty("win32", "provider.exe", [], "relative.exe").supported).toBe(false)
 })
+
+test("macOS PTY forwards literal argv through expect's environment with main's terminal settings", () => {
+  let received: Parameters<Kernel["spawnTree"]>[0] | undefined
+  const args = ["setup-token", "literal ' $value; [command]"]
+  spawnProviderLoginPty({
+    command: "/Applications/CLI tools/claude",
+    args,
+    cwd: "/tmp",
+    platform: "darwin",
+    env: { PATH: "/usr/bin:/bin", TOURI_HOST_TOKEN: "inert-token" },
+    spawn: (input) => {
+      received = input
+      return { success: false, errorCode: "SPAWN_FAILED", error: "inert fixture" }
+    },
+  })
+  expect(received?.cmd).toBe("/usr/bin/expect")
+  expect(received?.args[1]).toContain('set stty_init "columns 240 rows 40"')
+  expect(received?.env.TOURI_LOGIN_ARGV?.split("\x1f")).toEqual(["/Applications/CLI tools/claude", ...args])
+  expect(received?.env.TOURI_HOST_TOKEN).toBeUndefined()
+})

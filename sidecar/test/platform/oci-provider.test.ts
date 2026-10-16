@@ -1,4 +1,7 @@
 import { expect, test } from "bun:test"
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { createOciProvider } from "../../src/platform/oci-provider"
 import type { VmCommandOutput } from "../../src/vm/command"
 
@@ -15,6 +18,45 @@ const fixture = () => {
   })
   return { calls, provider }
 }
+test.each(["podman", "docker"] as const)(
+  "%s preserves host folder grants and rejects retargeted grants",
+  async (engine) => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "touri-oci-folders-")))
+    const source = join(root, "selected")
+    const outside = join(root, "outside")
+    mkdirSync(source)
+    mkdirSync(outside)
+    const calls: string[][] = []
+    const provider = createOciProvider({
+      engine,
+      run: async (args) => {
+        calls.push(args)
+        return ok()
+      },
+    })
+    const options = {
+      name: "touri-folders",
+      image: "touri-bot:8",
+      volumes: [
+        { type: "volume" as const, source: "touri-workspace", target: "/workspace" },
+        { type: "bind" as const, source, target: "/host/selected", readOnly: true },
+      ],
+    }
+    try {
+      expect((await provider.create(options)).success).toBe(true)
+      expect(calls[0]).toContain(`type=bind,source=${source},target=/host/selected,readonly`)
+      expect(calls[0]).toContain("type=volume,source=touri-workspace,target=/workspace")
+      rmSync(source, { recursive: true })
+      symlinkSync(outside, source, process.platform === "win32" ? "junction" : "dir")
+      const before = calls.length
+      expect(await provider.create(options)).toMatchObject({ success: false, errorCode: "INVALID_CONFIG" })
+      expect(calls).toHaveLength(before)
+    } finally {
+      await provider.destroy({ id: options.name })
+      rmSync(root, { recursive: true, force: true })
+    }
+  },
+)
 test("OCI bot lifecycle uses guest policy, private channels and persistent volumes", async () => {
   const { calls, provider } = fixture()
   try {

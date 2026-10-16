@@ -498,7 +498,10 @@ it("opens the new bot conversation after completing creation from a global scree
   fireEvent.click(screen.getByRole("button", { name: "touri" }))
   fireEvent.click(screen.getByRole("button", { name: "Criar bot" }))
   fireEvent.change(screen.getByLabelText("Nome"), { target: { value: "Clara" } })
-  for (let step = 0; step < 4; step++) fireEvent.click(screen.getByRole("button", { name: "Continuar" }))
+  for (let step = 0; step < 4; step++) {
+    if (step === 2) await screen.findByText("Login disponível para este bot.")
+    fireEvent.click(screen.getByRole("button", { name: "Continuar" }))
+  }
   fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Criar bot" }))
   expect(await screen.findByRole("textbox", { name: "Mensagem para Clara" })).toBeVisible()
   expect(screen.getByRole("button", { name: /^Bots/ })).toHaveAttribute("aria-current", "page")

@@ -1,151 +1,299 @@
-import { readFileSync } from "node:fs"
-import { cleanup, fireEvent, render, screen } from "@testing-library/react"
-import type { ApiRoutes } from "@touri/contracts"
+import { act, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react"
+import type { ApiRoutes, Message, ProviderLoginFlow } from "@touri/contracts"
+import { createRef } from "react"
 import { afterEach, expect, it, vi } from "vitest"
 import type { ApiRequest } from "../src/api/client"
 import { createMockApi } from "../src/api/mock"
+import { Composer } from "../src/components/Composer"
+import { BotCreateModal } from "../src/components/Modals"
 import { ProviderLogin } from "../src/components/ProviderLogin"
+import { useWorkspace } from "../src/useWorkspace"
 
-afterEach(cleanup)
+afterEach(() => vi.useRealTimers())
+const fixture = (state: ProviderLoginFlow["state"] = "idle") => {
+  const api = createMockApi()
+  const original = api.request
+  const flows = new Map<string, ProviderLoginFlow>()
+  const request = vi.fn(async (route: string, input: Record<string, string>, path?: Record<string, string>) => {
+    if (route === "GET /bots/:id/provider-login/flow")
+      return flows.get(input.provider ?? "codex") ?? { provider: input.provider, state }
+    if (route === "POST /bots/:id/provider-login/flow") {
+      const flow: ProviderLoginFlow = {
+        provider: input.provider as ProviderLoginFlow["provider"],
+        state: input.action === "start" ? "waiting" : input.action === "cancel" ? "cancelled" : "ready",
+      }
+      flows.set(input.provider ?? "codex", flow)
+      return flow
+    }
+    return original(route as keyof ApiRoutes, input as never, path)
+  })
+  api.request = request as ApiRequest
+  return {
+    api,
+    request,
+    setFlow: (value: ProviderLoginFlow) => {
+      flows.set(value.provider, value)
+    },
+  }
+}
 
-const missing: ApiRoutes["GET /bots/:id/provider-login"]["res"] = {
-  provider: "claude",
-  ready: false,
-  source: "missing",
-  configuredSource: "vault",
-  health: "not-found",
-  message: "Login ausente",
-}
-const ready = {
-  ...missing,
-  ready: true,
-  source: "token" as const,
-  health: "ready" as const,
-  message: "Login disponível",
-}
-const transport = {
-  ...missing,
-  health: "transport" as const,
-  message: "O cofre de segredos não respondeu. Tente novamente.",
-}
-const fixture = (request: ApiRequest) => {
+it("starts OAuth automatically, polls the device code and cancels without restarting", async () => {
+  const f = fixture()
+  render(<ProviderLogin api={f.api} botId="bot" provider="codex" onConfigured={vi.fn()} />)
+  await screen.findByText("Aguardando login no navegador…")
+  expect(f.request).toHaveBeenCalledWith(
+    "POST /bots/:id/provider-login/flow",
+    { provider: "codex", action: "start" },
+    { id: "bot" },
+  )
+  expect(document.querySelector('input[type="password"]')).toBeNull()
+  vi.useFakeTimers()
+  f.setFlow({
+    provider: "codex",
+    state: "waiting",
+    deviceCode: "ABCD-EFGH",
+    verificationUrl: "https://auth.openai.com/codex/device",
+  })
+  // Install a new polling cycle under fake timers.
+  fireEvent.click(screen.getByRole("button", { name: "Cancelar login" }))
+  await act(async () => {})
+  expect(screen.getByText("Login cancelado.")).toBeVisible()
+  const starts = f.request.mock.calls.filter(([, input]) => input.action === "start")
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(2000)
+  })
+  expect(f.request.mock.calls.filter(([, input]) => input.action === "start")).toHaveLength(starts.length)
+})
+
+it("offers host login first and connects with one click", async () => {
+  const f = fixture("host-available")
+  const configured = vi.fn()
+  render(<ProviderLogin api={f.api} botId="bot" provider="codex" onConfigured={configured} />)
+  await screen.findByRole("button", { name: "Usar login deste Mac" })
+  expect(f.request.mock.calls.some(([, input]) => input.action === "start")).toBe(false)
+  expect(f.request.mock.calls.some(([route]) => route === "GET /bots/:id/provider-login")).toBe(false)
+  fireEvent.click(screen.getByRole("button", { name: "Usar login deste Mac" }))
+  await waitFor(() => expect(configured).toHaveBeenCalledOnce())
+  expect(f.request).toHaveBeenCalledWith(
+    "POST /bots/:id/provider-login/flow",
+    { provider: "codex", action: "use-host" },
+    { id: "bot" },
+  )
+})
+
+it("keeps paste hidden and does not clear a rejected draft credential", async () => {
+  const f = fixture("cancelled")
+  const original = f.api.request
+  f.api.request = (async (route, input, path) => {
+    if (route === "POST /bots/:id/provider-login/flow" && (input as { action?: string }).action === "paste")
+      throw new Error("vault unavailable")
+    return original(route, input, path)
+  }) as ApiRequest
   const configured = vi.fn()
   render(
     <ProviderLogin
-      api={{ ...createMockApi(), request }}
-      botId="login-test"
-      provider="claude"
+      api={f.api}
+      botId="draft-00000000-0000-4000-8000-000000000000"
+      provider="codex"
       onConfigured={configured}
     />,
   )
-  return configured
-}
-const save = () => {
-  fireEvent.click(screen.getByRole("button", { name: "Entrar no Claude nesta máquina" }))
-  fireEvent.change(screen.getByLabelText("Token OAuth do Claude"), { target: { value: "fixture-oauth-token" } })
+  expect(document.querySelector('input[type="password"]')).toBeNull()
+  fireEvent.click(screen.getByRole("button", { name: "Colar token manualmente" }))
+  const input = screen.getByLabelText("Login JSON do Codex")
+  fireEvent.change(input, { target: { value: "synthetic-secret" } })
   fireEvent.click(screen.getByRole("button", { name: "Salvar login no cofre" }))
-}
-
-it("shows the route's transport message and retries the check without stale errors", async () => {
-  const request = vi.fn().mockResolvedValueOnce(transport).mockResolvedValue(ready)
-  fixture(request as ApiRequest)
-  expect(await screen.findByRole("status")).toHaveTextContent(transport.message)
-  fireEvent.click(await screen.findByRole("button", { name: "Tentar de novo" }))
-  await screen.findByText(ready.message)
-  expect(request).toHaveBeenCalledTimes(2)
-  expect(screen.queryByRole("alert")).toBeNull()
-  expect(screen.queryByRole("button", { name: "Tentar de novo" })).toBeNull()
-})
-
-it("recovers from a failed HTTP check and clears its error on retry", async () => {
-  const request = vi.fn().mockRejectedValueOnce(new Error("connection closed")).mockResolvedValue(ready)
-  fixture(request as ApiRequest)
-  expect(await screen.findByRole("alert")).toHaveTextContent("Não foi possível verificar o login.")
-  fireEvent.click(screen.getByRole("button", { name: "Tentar de novo" }))
-  await screen.findByText(ready.message)
-  expect(screen.queryByRole("alert")).toBeNull()
-})
-
-it("keeps a failed save distinct from a failed check and lets the user retry the save", async () => {
-  let writes = 0
-  const request = vi.fn(async (route: string) => {
-    if (route === "GET /bots/:id/provider-login") return writes > 1 ? ready : missing
-    if (++writes === 1) throw new Error("vault unavailable")
-    return {}
-  })
-  const configured = fixture(request as ApiRequest)
-  await screen.findByText(missing.message)
-  save()
-  expect(await screen.findByRole("alert")).toHaveTextContent("Não foi possível salvar o login no cofre de segredos.")
-  expect(screen.getByLabelText("Token OAuth do Claude")).toHaveValue("fixture-oauth-token")
+  await screen.findByRole("alert")
+  expect(input).toHaveValue("synthetic-secret")
   expect(configured).not.toHaveBeenCalled()
-  fireEvent.click(screen.getByRole("button", { name: "Tentar de novo" }))
-  await screen.findByText(ready.message)
-  expect(writes).toBe(2)
-  expect(configured).toHaveBeenCalledOnce()
-  expect(screen.queryByRole("alert")).toBeNull()
-  expect(screen.queryByLabelText("Token OAuth do Claude")).toBeNull()
+  expect(document.body.textContent).not.toContain("synthetic-secret")
 })
 
-it("shows a post-save check failure as a check failure without saving again on retry", async () => {
-  const request = vi
-    .fn()
-    .mockResolvedValueOnce(missing)
-    .mockResolvedValueOnce({})
-    .mockRejectedValueOnce(new Error("connection closed"))
-    .mockResolvedValue(ready)
-  const configured = fixture(request as ApiRequest)
-  await screen.findByText(missing.message)
-  save()
-  expect(await screen.findByRole("alert")).toHaveTextContent("Não foi possível verificar o login.")
-  expect(configured).toHaveBeenCalledOnce()
-  expect(screen.queryByLabelText("Token OAuth do Claude")).toBeNull()
-  fireEvent.click(screen.getByRole("button", { name: "Tentar de novo" }))
-  await screen.findByText(ready.message)
-  expect(request.mock.calls.filter(([route]) => route === "PUT /bots/:id/provider-login")).toHaveLength(1)
+it("composer blocks submission until login succeeds and shows the device challenge", async () => {
+  vi.useFakeTimers()
+  const f = fixture("waiting")
+  f.setFlow({ provider: "codex", state: "waiting", deviceCode: "ABCD-EFGH" })
+  const bot = f.api.getState().bots[0]
+  if (!bot) throw new Error("Missing fixture")
+  const send = vi.fn().mockResolvedValue(undefined)
+  const openLogin = vi.fn()
+  render(
+    <Composer
+      api={f.api}
+      bot={bot}
+      threadId="thread"
+      parentId={null}
+      draft="Primeira mensagem"
+      onDraft={vi.fn()}
+      inputRef={createRef()}
+      activeRun={null}
+      queuedCount={0}
+      onSend={send}
+      onCancel={vi.fn()}
+      onOpenProviderLogin={openLogin}
+      notice={{
+        bot,
+        latestReply: {
+          runId: "failed-login-run",
+          status: "failed",
+          parts: [{ type: "notice", level: "error", text: "cli_auth: login ausente" }],
+        } as Message,
+        machine: undefined,
+        onRetry: vi.fn(),
+      }}
+    />,
+  )
+  await act(async () => {})
+  expect(screen.getByText("ABCD-EFGH")).toBeVisible()
+  expect(screen.queryByText(/Entre no .+ para continuar/)).toBeNull()
+  expect(screen.queryByRole("button", { name: "Entrar no provedor" })).toBeNull()
+  const button = screen.getByRole("button", { name: "Enviar" })
+  expect(button).toBeDisabled()
+  fireEvent.click(screen.getByRole("button", { name: "Colar token manualmente" }))
+  expect(openLogin).toHaveBeenCalledOnce()
+  fireEvent.submit(screen.getByRole("form", { name: "Compor mensagem" }))
+  expect(send).not.toHaveBeenCalled()
+  f.setFlow({ provider: "codex", state: "ready" })
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1000)
+  })
+  expect(button).toBeEnabled()
+  fireEvent.click(button)
+  expect(send).toHaveBeenCalledOnce()
 })
 
-it("preserves the route's transport message after a successful save and retries only the check", async () => {
-  const request = vi
-    .fn()
-    .mockResolvedValueOnce(missing)
-    .mockResolvedValueOnce({})
-    .mockResolvedValueOnce(transport)
-    .mockResolvedValue(ready)
-  const configured = fixture(request as ApiRequest)
-  await screen.findByText(missing.message)
-  save()
-  await screen.findByText(transport.message)
-  expect(configured).toHaveBeenCalledOnce()
-  expect(screen.queryByRole("alert")).toBeNull()
-  expect(screen.queryByLabelText("Token OAuth do Claude")).toBeNull()
-  fireEvent.click(screen.getByRole("button", { name: "Tentar de novo" }))
-  await screen.findByText(ready.message)
-  expect(request.mock.calls.filter(([route]) => route === "PUT /bots/:id/provider-login")).toHaveLength(1)
+it("opens the device login page once across simultaneous composer and settings views", async () => {
+  const f = fixture("waiting")
+  const open = vi.spyOn(window, "open").mockImplementation(() => null)
+  f.setFlow({ provider: "codex", state: "waiting", verificationUrl: "https://auth.openai.com/codex/device" })
+  const { unmount } = render(
+    <>
+      <ProviderLogin api={f.api} botId="bot" provider="codex" onConfigured={vi.fn()} />
+      <ProviderLogin api={f.api} botId="bot" provider="codex" onConfigured={vi.fn()} />
+    </>,
+  )
+  await waitFor(() =>
+    expect(open).toHaveBeenCalledExactlyOnceWith(
+      "https://auth.openai.com/codex/device",
+      "_blank",
+      "noopener,noreferrer",
+    ),
+  )
+  unmount()
+  open.mockRestore()
 })
 
-it("spaces the save actions and failure line using the provider login styles", async () => {
-  const style = document.createElement("style")
-  style.textContent =
-    readFileSync("src/styles.css", "utf8")
-      .match(/\.provider-login[^}]*\}/g)
-      ?.join("\n") ?? ""
-  document.head.append(style)
-  try {
-    const request = vi.fn().mockResolvedValueOnce(missing).mockRejectedValue(new Error("vault unavailable"))
-    fixture(request as ApiRequest)
-    await screen.findByText(missing.message)
-    save()
-    const error = await screen.findByRole("alert")
-    const actions = screen.getByRole("button", { name: "Salvar login no cofre" }).parentElement as HTMLElement
-    expect(getComputedStyle(actions).display).toBe("flex")
-    expect(getComputedStyle(actions).gap).toBe("var(--space-8)")
-    expect(getComputedStyle(actions).marginTop).toBe("var(--space-12)")
-    const section = screen.getByRole("region", { name: "Login do provedor nesta máquina" })
-    expect(getComputedStyle(section).display).toBe("grid")
-    expect(getComputedStyle(section).gap).toBe("var(--space-12)")
-    expect(getComputedStyle(error).marginTop).toBe("0px")
-  } finally {
-    style.remove()
-  }
+it("shows the Claude code prompt and error without opening a second browser page", async () => {
+  const f = fixture("waiting")
+  const open = vi.spyOn(window, "open").mockImplementation(() => null)
+  const url = "https://claude.com/cai/oauth/authorize?client_id=synthetic&state=synthetic-state"
+  const codeError = "Código inválido. Copie o código completo exibido no navegador e tente novamente."
+  f.setFlow({ provider: "claude", state: "waiting", needsCode: true, verificationUrl: url, codeError })
+  const configured = vi.fn()
+  render(<ProviderLogin api={f.api} botId="bot" provider="claude" onConfigured={configured} />)
+  const input = await screen.findByLabelText("Código exibido no navegador")
+  expect(input).toHaveAttribute("type", "text")
+  expect(input).toHaveAttribute("aria-invalid", "true")
+  expect(screen.getByRole("alert")).toHaveTextContent(codeError)
+  expect(screen.getByRole("link", { name: "Abrir página de login" })).toHaveAttribute("href", url)
+  expect(open).not.toHaveBeenCalled()
+  expect(screen.getByRole("button", { name: "Enviar código" })).toBeDisabled()
+  fireEvent.click(screen.getByRole("link", { name: "Abrir página de login" }))
+  expect(open).toHaveBeenCalledExactlyOnceWith(url, "_blank", "noopener,noreferrer")
+  fireEvent.change(input, { target: { value: "synthetic-browser-code" } })
+  fireEvent.click(screen.getByRole("button", { name: "Enviar código" }))
+  await waitFor(() => expect(configured).toHaveBeenCalledOnce())
+  expect(f.request).toHaveBeenCalledWith(
+    "POST /bots/:id/provider-login/flow",
+    { provider: "claude", action: "code", value: "synthetic-browser-code" },
+    { id: "bot" },
+  )
+  expect(document.body.textContent).not.toContain("synthetic-browser-code")
+  open.mockRestore()
+})
+
+it("keeps a Claude code for retry when its submission fails", async () => {
+  const f = fixture("waiting")
+  f.setFlow({ provider: "claude", state: "waiting", needsCode: true })
+  const original = f.api.request
+  f.api.request = (async (route, input, path) => {
+    if (route === "POST /bots/:id/provider-login/flow" && (input as { action?: string }).action === "code")
+      throw new Error("synthetic failure")
+    return original(route, input, path)
+  }) as ApiRequest
+  render(<ProviderLogin api={f.api} botId="bot" provider="claude" onConfigured={vi.fn()} />)
+  const input = await screen.findByLabelText("Código exibido no navegador")
+  fireEvent.change(input, { target: { value: "synthetic-browser-code" } })
+  fireEvent.keyDown(input, { key: "Enter" })
+  await screen.findByRole("alert")
+  expect(input).toHaveValue("synthetic-browser-code")
+  expect(screen.getByRole("button", { name: "Enviar código" })).toBeEnabled()
+})
+
+it("creation starts the selected provider before creating a bot and cancels on close", async () => {
+  const f = fixture()
+  const create = vi.fn()
+  const view = render(<BotCreateModal api={f.api} onCreate={create} onClose={vi.fn()} />)
+  fireEvent.change(screen.getByLabelText("Nome"), { target: { value: "Pesquisa" } })
+  fireEvent.click(screen.getByRole("button", { name: "Continuar" }))
+  fireEvent.click(screen.getByRole("button", { name: "Continuar" }))
+  fireEvent.change(screen.getByLabelText("Provedor"), { target: { value: "claude" } })
+  await screen.findByText("Aguardando login no navegador…")
+  await waitFor(() =>
+    expect(f.request).toHaveBeenCalledWith(
+      "POST /bots/:id/provider-login/flow",
+      { provider: "claude", action: "start" },
+      { id: expect.stringMatching(/^draft-/) },
+    ),
+  )
+  expect(create).not.toHaveBeenCalled()
+  view.unmount()
+  expect(f.request).toHaveBeenCalledWith(
+    "POST /bots/:id/provider-login/flow",
+    { provider: "claude", action: "cancel" },
+    { id: expect.stringMatching(/^draft-/) },
+  )
+})
+
+it("relays OpenCode menu navigation to its own CLI", async () => {
+  const f = fixture("waiting")
+  f.setFlow({ provider: "opencode", state: "waiting", prompt: { kind: "provider", choice: "OpenAI" } })
+  render(<ProviderLogin api={f.api} botId="bot" provider="opencode" onConfigured={vi.fn()} />)
+  await screen.findByText("OpenAI")
+  fireEvent.click(screen.getByRole("button", { name: "Confirmar opção" }))
+  await waitFor(() =>
+    expect(f.request).toHaveBeenCalledWith(
+      "POST /bots/:id/provider-login/flow",
+      { provider: "opencode", action: "input", input: "enter" },
+      { id: "bot" },
+    ),
+  )
+})
+
+it("adopts creation login into the created bot and reuses that bot after a failed adoption", async () => {
+  const api = createMockApi()
+  const original = api.request
+  let denied = true
+  const request = vi.fn(async (route: keyof ApiRoutes, input: never, path?: Record<string, string>) => {
+    if (route === "POST /bots/:id/provider-login/flow" && denied) {
+      denied = false
+      throw new Error("vault unavailable")
+    }
+    return original(route, input, path)
+  })
+  api.request = request as ApiRequest
+  const { result } = renderHook(() => useWorkspace(api, false))
+  const input = { provider: "codex" as const, name: "Pesquisa" }
+  await act(async () => {
+    await expect(result.current.actions.createBot(input, "draft-test")).rejects.toThrow("vault unavailable")
+  })
+  await act(async () => {
+    await result.current.actions.createBot(input, "draft-test")
+  })
+  expect(request.mock.calls.filter(([route]) => route === "POST /bots")).toHaveLength(1)
+  expect(request).toHaveBeenCalledWith(
+    "POST /bots/:id/provider-login/flow",
+    { provider: "codex", action: "adopt", draftId: "draft-test" },
+    { id: result.current.data.selectedBotId },
+  )
 })
