@@ -27,5 +27,21 @@ fn main() {
         println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
     }
     println!("cargo:rerun-if-changed=build.rs");
+    if target.contains("windows-msvc") {
+        // Test binaries never get Tauri's app manifest, so comctl32 v6 entry points
+        // (e.g. TaskDialogIndirect) are missing and the test harness fails to start.
+        // Embed one manifest for every binary instead.
+        let manifest = std::env::current_dir()
+            .expect("build script cwd")
+            .join("windows-app-manifest.xml");
+        println!("cargo:rerun-if-changed={}", manifest.display());
+        println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
+        println!("cargo:rustc-link-arg=/MANIFESTINPUT:{}", manifest.display());
+        println!("cargo:rustc-link-arg=/WX");
+        let windows = tauri_build::WindowsAttributes::new_without_app_manifest();
+        tauri_build::try_build(tauri_build::Attributes::new().windows_attributes(windows))
+            .expect("tauri build");
+        return;
+    }
     tauri_build::build()
 }
