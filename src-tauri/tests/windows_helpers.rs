@@ -90,15 +90,19 @@ fn killing_the_stdio_helper_terminates_its_process_tree() {
         .spawn()
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(20);
-    while !marker.exists() {
+    let pid: u32 = loop {
+        if let Ok(text) = std::fs::read_to_string(&marker) {
+            if let Ok(pid) = text.parse() {
+                break pid;
+            }
+        }
         if Instant::now() > deadline {
             let _ = helper.kill();
             let _ = helper.wait();
             panic!("job fixture did not start");
         }
         std::thread::sleep(Duration::from_millis(20));
-    }
-    let pid: u32 = std::fs::read_to_string(&marker).unwrap().parse().unwrap();
+    };
     let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
     assert!(!handle.is_null());
     let child = unsafe { OwnedHandle::from_raw_handle(handle) };

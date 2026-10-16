@@ -47,9 +47,11 @@ fn run_piped(_: Vec<OsString>) -> Result<i32, String> {
 }
 #[cfg(windows)]
 fn run_piped(args: Vec<OsString>) -> Result<i32, String> {
+    use std::os::windows::process::CommandExt;
     let job = super::platform::windows_job::own_process_tree().map_err(|e| e.to_string())?;
     std::mem::forget(job);
     std::process::Command::new(&args[0])
+        .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
         .args(&args[1..])
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())

@@ -2,7 +2,7 @@ import type { Database } from "bun:sqlite"
 import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import type { Bot, Kernel } from "@touri/contracts"
-import { openWorkspaceEntry } from "../kernel/files"
+import { openWorkspaceEntry, readBoundedFile } from "../kernel/files"
 import { withDeadline } from "../kernel/policy"
 
 export const providerLoginAccount = (botId: string, provider: Bot["provider"]): string =>
@@ -49,6 +49,10 @@ export class ProviderLoginError extends Error {
 }
 
 const readHostLoginFile = (hostHome: string, target: LoginTarget): string => {
+  if (process.platform === "win32") {
+    const root = join(hostHome, target.directory)
+    return readBoundedFile({ root, path: join(root, target.file), maxBytes: 20000 }).toString("utf8")
+  }
   const directory = openSync(
     join(hostHome, target.directory),
     constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
