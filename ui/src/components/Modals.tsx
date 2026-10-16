@@ -46,6 +46,7 @@ import { MachineFields } from "./MachineFields"
 import { ProviderLogin } from "./ProviderLogin"
 import { ProviderMark, providerName } from "./ProviderMark"
 import { ProviderModelField } from "./ProviderModelField"
+import { ProviderProfileFields } from "./ProviderProfileFields"
 import { SecretsPanel } from "./RightPanels"
 import { SettingsGroup, SettingsLayout, SettingsPane, SettingsRow, SettingsSwitch } from "./SettingsLayout"
 import "./settings.css"
@@ -1025,6 +1026,10 @@ export const BotSettingsModal = ({
   const [addingProject, setAddingProject] = useState(false)
   const [folders, setFolders] = useState(bot.folders ?? [])
   const [anyFolderAccess, setAnyFolderAccess] = useState(bot.anyFolderAccess ?? false)
+  const [profile, setProfile] = useState({
+    providerProfile: bot.providerProfile ?? null,
+    claudeAiConnectors: bot.claudeAiConnectors ?? false,
+  })
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
   const [updating, setUpdating] = useState(false)
@@ -1085,6 +1090,12 @@ export const BotSettingsModal = ({
         projectId: projectId || null,
         folders,
         anyFolderAccess,
+        ...(machine.machine === "local" && provider !== "opencode"
+          ? {
+              providerProfile: profile.providerProfile,
+              claudeAiConnectors: provider === "claude" && profile.claudeAiConnectors,
+            }
+          : { providerProfile: null, claudeAiConnectors: false }),
       })
       onClose()
     } catch (error) {
@@ -1163,6 +1174,14 @@ export const BotSettingsModal = ({
                 botId={bot.id}
                 provider={provider}
                 onConfigured={() => setMachine((current) => ({ ...current, vmProviderLogin: true }))}
+              />
+            )}
+            {api && machine.machine === "local" && (
+              <ProviderProfileFields
+                api={api}
+                provider={provider}
+                values={profile}
+                onChange={(patch) => setProfile((current) => ({ ...current, ...patch }))}
               />
             )}
             <SettingsRow
