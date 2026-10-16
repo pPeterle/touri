@@ -1,6 +1,13 @@
 # Desktop platforms
 
-The desktop shell and sidecar can be built on macOS and Linux. Windows has build targets and native shell boundaries, but its sidecar runtime port is incomplete.
+macOS and Linux have desktop builds. Windows x64 now has native runtime adapters and a CI build workflow, but remains in progress until its native fixtures, installers and desktop onboarding are executed on Windows.
+
+| Platform | Runtime implementation | Verified in this worktree |
+| --- | --- | --- |
+| macOS / Apple Silicon | Existing Keychain, host computer use and Apple container provider | Existing macOS CI/release commands retained; no macOS execution on the Linux host |
+| Linux / x86_64 | Secret Service, local bots/browser, Podman or Docker OCI bots | AppImage/.deb builds, packaged Xvfb onboarding/native vault, compiled API smoke and full suites; live OCI blocked by host user-namespace policy |
+| Linux / arm64 | Same Linux runtime; native GTK/WebKit packaging required | Sidecar cross-build only; native packages/runtime still need ARM64 hardware |
+| Windows / x86_64 | Credential Manager, ConPTY, authenticated loopback RPC/MCP, private file/lock/job helpers, Docker Desktop WSL2 provider | Windows GNU Rust check including native fixtures, sidecar .exe cross-builds, portable transport/provider tests on Linux; Windows execution/installer results pending |
 
 ## Linux
 
@@ -28,19 +35,54 @@ Host computer control is currently macOS-only and is hidden on Linux/Windows. Li
 
 On hosts with limited disk space, disable incremental/debug artifacts while compiling. Remove disposable `src-tauri/target` intermediates after preserving bundles. A first guest image build may need substantially more space than the desktop build.
 
-## Windows: remaining runtime work
+## Windows runtime and builds
 
-`bun run build:sidecar:windows` generates `touri-sidecar-x86_64-pc-windows-msvc.exe`; `bun run build:sidecar:windows:gnu` generates the GNU variant for cross-checking. The native Windows Tauri overlay selects MSI and NSIS and includes an ICO. Windows installer packaging requires a Windows toolchain/host and has not been exercised on Linux.
+Use Bun 1.4.3+, Rust 1.90+ with the native MSVC toolchain, Windows x64 and WebView2. VM bots additionally require a Windows release supported by Docker Desktop, its WSL2 backend and Linux containers. No container engine is required for local bots.
 
-The Rust shell uses Credential Manager and token-authenticated ephemeral loopback TCP for its host bridge. Sidecar endpoint parsing accepts only loopback TCP; MCP has a data-directory-scoped named-pipe endpoint with the existing per-thread token protocol. Docker Desktop/WSL2 uses the OCI command provider.
+```powershell
+bun install --frozen-lockfile
+bun run build:sidecar:windows
+cargo test --manifest-path src-tauri/Cargo.toml
+bun run test:sidecar:portable
+bun --cwd ui test --maxWorkers=2 --minWorkers=1 --testTimeout=30000
+bun run test:sidecar:smoke
+bun run tauri build --bundles "msi,nsis"
+```
 
-Windows onboarding is **not ready**. Remaining work:
+The sidecar is `src-tauri/binaries/touri-sidecar-x86_64-pc-windows-msvc.exe`. MSI/NSIS output is under `src-tauri/target/release/bundle/{msi,nsis}`. `build:sidecar:windows:gnu` creates the equivalent GNU-named sidecar; `cargo check --target x86_64-pc-windows-gnu --tests` checks Windows Rust code from Linux with MinGW installed. These cross-builds do not execute Windows code or create a validated installer.
 
-- Replace the sidecar's POSIX FFI file operations, flock ownership/parent/process checks, and Unix-oriented extra process descriptors with native handle/ACL/job-object implementations. The sidecar still loads POSIX libraries and needs native Windows replacements before startup can succeed.
-- Implement ConPTY. The PTY adapter explicitly reports unsupported and directs users to terminal login plus credential import.
-- Implement native single-instance handoff and file identity for attachment grants. File drops fail closed until native identity is available.
-- Validate named-pipe ACLs, per-user application directory ACLs, shell/PATH separators, native provider paths, child cancellation and Docker Desktop network isolation on Windows.
-- Build/run MSI and NSIS on Windows and run the full test suites there. A Linux GNU cargo check is compile evidence only.
+Desktop data uses `%APPDATA%\touri`, with `TOURI_APP_DATA` as an override. The shell passes its own executable as `TOURI_DESKTOP_HELPER`. When running sidecar source independently on Windows, set that variable to a built `touri.exe`. The portable test/smoke scripts locate `src-tauri/target/debug/touri.exe`, built by `cargo test`.
+
+The helper runs before GUI initialization. Private file operations use current-user/SYSTEM DACLs and hold directory handles against ancestor replacement. Reparse points and device/alternate-stream names are rejected; private file reads and replacements also reject hard links. Database preparation, atomic writes and bot-home removal use this boundary. Runtime ownership uses a native byte-range lock, released when the sidecar's helper input closes. Parent monitoring uses a process handle; ordinary child protocols use Windows jobs so cancellation cleans their process trees. POSIX libraries are loaded only by operations that use them.
+
+The provider-login PTY interface selects ConPTY and streams browser-code input through stdin, flushes terminal prompts and preserves the child exit status. It accepts native provider executables; an npm batch wrapper may need its underlying `node.exe` entrypoint instead. The current settings UI still imports host login files or pasted credentials; no terminal/login UI was added. Host credential-file reads use the native bounded-file interface on Windows. No real provider login was used in development or tests.
+
+Host RPC binds an ephemeral IPv4 loopback listener and authenticates with the shell token before privileged requests. MCP independently binds loopback and publishes `run/mcp-endpoint.json` inside the private data directory. Clients validate that endpoint and retain per-thread/run tokens, typed request IDs, token revalidation and revocation. The VM bridge uses the same endpoint parser. Unix sockets remain the transport on macOS/Linux.
+
+Docker Desktop reuses the OCI image, lifecycle, named volumes, nft/DNS policy and private exec forwarding. Health checks require a local Docker Desktop named-pipe context, Linux containers and WSL2 kernel metadata; remote contexts and incompatible engines report an actionable local-bot fallback. Private control/display relays use random Windows pipe names; guest ports are not published. The containers share the WSL2 Linux kernel, and Docker access inherits the daemon's privileges. Doctor does not start Docker Desktop or change its settings.
+
+### Windows gaps and native validation
+
+These features still need implementation:
+
+- Single-instance activation/handoff. The runtime lock prevents concurrent data writers, but the Windows shell handoff remains a stub.
+- Native identity for drag-and-drop attachment grants. Grants explicitly fail closed on Windows.
+- Local workspace directory-descriptor browsing and streamed local evidence-image reads. These paths fail closed rather than emulate POSIX descriptors.
+- Local Chromium's extra pipe descriptors. Use the container browser; host computer control is hidden.
+- Remote snapshot download publication and the legacy SQLite snapshot importer, which retain POSIX-specific operations. Local OCI export uses the engine CLI and still needs native validation.
+
+These implemented paths still need Windows execution:
+
+- Native ConPTY console/input/exit fixtures, helper lock/EOF and job cancellation, native file/pinning fixtures, DACL/junction checks, Credential Manager round trips and the compiled local-bot API smoke. Windows CI is configured to run them; it has not been triggered by this worktree.
+- MSI and NSIS installation, WebView2 cold launch, tray, notifications, startup registration and uninstall under a standard user.
+- Docker Desktop WSL2 image boot, persistent volumes, guest browser/display, cancellation and fail-closed network/DNS isolation, including access from a second Windows user.
+- Provider executable discovery, browser/device-code authentication and credential persistence across app restarts. Only inert provider/console fixtures were run here; native accountful onboarding remains untested.
+
+## Platform CI
+
+`.github/workflows/ci.yml` includes `windows-latest` and `ubuntu-latest` jobs using Bun 1.4.3. Windows builds the sidecar, runs typecheck/lint, native Rust/ConPTY/helper tests, the portable sidecar suite, the UI suite and a compiled API smoke, then builds MSI/NSIS and uploads both installers plus the sidecar. Linux runs the full suites and an isolated D-Bus/keyring session, the compiled smoke and AppImage/.deb packaging, then uploads the bundles. macOS commands and its Bun pin remain unchanged.
+
+The portable sidecar selection is explicit in `scripts/test-sidecar-portable.ts`; Unix permission/signal/FFI fixtures and opt-in integration suites remain in the full Linux/macOS runs. `scripts/smoke-sidecar.ts` compiles an inert Codex-protocol fixture, creates a local bot and checks its persisted first reply without a provider account. CI does not perform real provider logins or live VM onboarding.
 
 ## Validation without provider accounts
 
@@ -52,9 +94,9 @@ TOURI_VM_INTEGRATION=0 TOURI_E2E_REAL_CLI=0 TOURI_OPENCODE_REAL=0 \
 bun --cwd ui test --maxWorkers=1 --minWorkers=1 --testTimeout=30000
 bun run typecheck
 bun run lint
-cargo test --manifest-path src-tauri/Cargo.toml
+dbus-run-session -- bash scripts/test-native-linux.sh
 ```
 
-The native secret round-trip test is ignored by default because it requires an unlocked desktop service. In an isolated session with such a service, run `cargo test --manifest-path src-tauri/Cargo.toml native_secret_round_trip -- --ignored`. It uses a dedicated test service/account and deletes its fixture. Fake provider fixtures can exercise the first-message protocol without launching any real provider CLI.
+Linux native integration tests require an unlocked Secret Service; `scripts/test-native-linux.sh` creates an isolated test keyring/session for them and also runs the dedicated round trip. The dedicated native secret round-trip test is ignored by default because it requires an unlocked desktop service. In an isolated session with such a service, run `cargo test --manifest-path src-tauri/Cargo.toml native_secret_round_trip -- --ignored`. It uses a dedicated test service/account and deletes its fixture. Fake provider fixtures can exercise the first-message protocol without launching any real provider CLI.
 
-Bun 1.2.21 aborted in native/JSC code during the full Linux suite on the port host, including in a JIT-disabled retry. Linux CI uses [Bun 1.4.3](https://github.com/oven-sh/bun/releases/tag/bun-v1.4.3); macOS CI/release retain their existing Bun pin. Use the baseline Linux x64 Bun distribution on hosts without AVX.
+Bun 1.2.21 aborted in native/JSC code during the full Linux suite on the port host, including in a JIT-disabled retry. Linux and Windows CI use [Bun 1.4.3](https://github.com/oven-sh/bun/releases/tag/bun-v1.4.3); macOS CI/release retain their existing Bun pin. Use the baseline Linux x64 Bun distribution on hosts without AVX.
