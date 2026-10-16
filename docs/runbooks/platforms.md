@@ -80,6 +80,14 @@ These implemented paths still need Windows execution:
 
 ## Platform CI
 
+### Local provider folder security
+
+On macOS, local Claude, Codex and OpenCode processes inherit a Seatbelt profile, including their shell commands and descendants. Explicit read-only folder grants remain read-only even with full provider access; sensitive host trees and touri's API credentials are excluded except for explicit grants and the bot's own runtime files.
+
+Linux and Windows do not currently have an equivalent outer sandbox for local provider processes. Local bots without folder grants still use the provider's access and approval policies: Claude's tool allow/deny rules, Codex's sandbox configuration and OpenCode's permissions. Those provider policies do not establish the inherited host boundary that Seatbelt provides, especially for shell commands and provider approval bypasses. Local launches with explicit folders or `anyFolderAccess` fail closed with `SPAWN_FAILED` and an explanation that folder access requires the macOS sandbox. Removing those grants permits the ordinary local mode with provider-enforced restrictions; it does not add host isolation.
+
+Guest executions retain provider CLI folder rules and the guest's outer isolation, with read-only bind mounts and sensitive-path masking. Folder policy tests use inert provider fixtures for both local and guest execution; no real provider CLI or VM is needed.
+
 `.github/workflows/ci.yml` includes `windows-latest` and `ubuntu-latest` jobs using Bun 1.4.3. Windows builds the sidecar, runs typecheck/lint, native Rust/ConPTY/helper tests, the portable sidecar suite, the UI suite and a compiled API smoke, then builds MSI/NSIS and uploads both installers plus the sidecar. Linux runs the full suites and an isolated D-Bus/keyring session, the compiled smoke and AppImage/.deb packaging, then uploads the bundles. macOS commands and its Bun pin remain unchanged.
 
 The portable sidecar selection is explicit in `scripts/test-sidecar-portable.ts`; Unix permission/signal/FFI fixtures and opt-in integration suites remain in the full Linux/macOS runs. `scripts/smoke-sidecar.ts` compiles an inert Codex-protocol fixture, creates a local bot and checks its persisted first reply without a provider account. CI does not perform real provider logins or live VM onboarding.
