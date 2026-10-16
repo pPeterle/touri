@@ -23,13 +23,14 @@ import { botWorkspaceRoutes } from "./workspace-routes"
 export const name = "vm"
 export const init = async (kernel: Kernel): Promise<void> => {
   const engine = ociEngine()
-  const provider = engine
-    ? createOciProvider({ engine, dataDir: kernel.paths.appData })
-    : createAppleContainerProvider({
-        dataDir: kernel.paths.appData,
-        warn: (code, detail) =>
-          kernel.log({ level: "warn", module: "vm", msg: code, data: { detail: kernel.redact(detail) } }),
-      })
+  const provider =
+    process.platform !== "darwin"
+      ? createOciProvider({ engine: engine ?? "docker", dataDir: kernel.paths.appData })
+      : createAppleContainerProvider({
+          dataDir: kernel.paths.appData,
+          warn: (code, detail) =>
+            kernel.log({ level: "warn", module: "vm", msg: code, data: { detail: kernel.redact(detail) } }),
+        })
   const capability = machineCapability()
   const runtime = createVmRuntime({ kernel, provider, capability })
   const cloud = initCloud(kernel)

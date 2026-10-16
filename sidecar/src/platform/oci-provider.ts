@@ -10,6 +10,7 @@ import { BOT_BOOT_COMMAND, CANCEL_VM_PROCESS_COMMAND, VM_PROCESS_COMMAND } from 
 import { BOT_IMAGE, imageContext } from "../vm/image"
 import { createPrivateForwarding } from "../vm/private-forwarding"
 import type { VmExecOptions, VmProvider, VmResult } from "../vm/types"
+import { probeOciService, WINDOWS_VM_FIX } from "./oci-health"
 
 export type OciEngine = "podman" | "docker"
 const validName = (name: string) => /^[a-z0-9][a-z0-9_.-]{0,62}$/.test(name)
@@ -29,11 +30,13 @@ export const createOciProvider = ({
   binary = Bun.which(engine) ?? engine,
   dataDir = tmpdir(),
   run = createVmCommandRunner({ binary }),
+  platform = process.platform,
 }: {
   engine: OciEngine
   binary?: string
   dataDir?: string
   run?: VmCommandRunner
+  platform?: string
 }): VmProvider => {
   const forwarding = createPrivateForwarding({ spawn: (options) => provider.spawn(options) })
   const keys = new Map<string, string>()
@@ -45,7 +48,7 @@ export const createOciProvider = ({
     const output = await run(args, signal ? { signal } : {})
     return output.code === 0 ? { success: true, output } : commandError({ output, action: `${engine} ${args[0]}` })
   }
-  const info = () => run(["info", "--format", "json"], { timeoutMs: 1500 })
+  const info = () => probeOciService({ engine, platform, run })
   let imageBuild: Promise<void> | null = null
   const provider: VmProvider = {
     name: engine,
@@ -56,7 +59,10 @@ export const createOciProvider = ({
         : {
             success: false,
             errorCode: "MACHINE_SERVICE_UNAVAILABLE",
-            error: `${engine} unavailable; check rootless user namespaces or start Docker Desktop. Use local bots meanwhile.`,
+            error:
+              platform === "win32"
+                ? WINDOWS_VM_FIX
+                : `${engine} unavailable; check rootless user namespaces or start Docker Desktop. Use local bots meanwhile.`,
           }
     },
     async doctor() {
@@ -69,8 +75,10 @@ export const createOciProvider = ({
           detail:
             output.code === 0
               ? `${engine} ready`
-              : `${engine} unavailable; check rootless user namespaces / daemon. Local bots are available.`,
-          fix: output.code === 0 ? null : `Run ${engine} info in your terminal`,
+              : platform === "win32"
+                ? WINDOWS_VM_FIX
+                : `${engine} unavailable; check rootless user namespaces / daemon. Local bots are available.`,
+          fix: output.code === 0 ? null : platform === "win32" ? WINDOWS_VM_FIX : `Run ${engine} info in your terminal`,
         },
         {
           id: "vm-image",

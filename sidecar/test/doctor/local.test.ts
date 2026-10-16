@@ -545,6 +545,24 @@ for (const platform of ["linux", "win32"])
         { PATH: "/login/shell/bin" },
         async (binary, args, abort) => {
           calls.push({ binary, args })
+          if (platform === "win32" && args[0] === "info")
+            return {
+              code: 0,
+              stdout: JSON.stringify({
+                OSType: "linux",
+                OperatingSystem: "Docker Desktop",
+                KernelVersion: "fixture-WSL2",
+              }),
+              stderr: "",
+              timedOut: false,
+            }
+          if (platform === "win32" && args[0] === "context")
+            return {
+              code: 0,
+              stdout: JSON.stringify("npipe:////./pipe/dockerDesktopLinuxEngine"),
+              stderr: "",
+              timedOut: false,
+            }
           return command(binary, args, abort)
         },
         signal(),

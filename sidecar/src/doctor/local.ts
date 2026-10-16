@@ -7,6 +7,7 @@ import { SCHEMA_VERSION } from "../kernel/db"
 import { hostPlatform, ociEngine, platformFor } from "../platform"
 import { containerKernelPresent } from "../platform/macos"
 import { appleContainerChecks } from "../platform/macos/doctor-local"
+import { probeOciService, WINDOWS_VM_FIX } from "../platform/oci-health"
 import { providerLoginPty } from "../platform/provider-login"
 import { touriVersion } from "../version"
 import { BOT_IMAGE, imageContext } from "../vm/image"
@@ -247,12 +248,19 @@ const containerChecks = async (
           "vm-system",
           "Máquinas · serviço",
           "warn",
-          "Podman/Docker unavailable. Local bots remain available.",
-          "Install rootless Podman or Docker Desktop",
+          probes.platform === "win32" ? WINDOWS_VM_FIX : "Podman/Docker unavailable. Local bots remain available.",
+          probes.platform === "win32" ? WINDOWS_VM_FIX : "Install rootless Podman or Docker Desktop",
         ),
       ]
     const executable = probes.which(engine, shellPath) ?? engine
-    const service = await run(executable, ["info", "--format", "json"], signal)
+    const service = await probeOciService({
+      engine,
+      platform: probes.platform,
+      run: async (args) => {
+        const output = await run(executable, args, signal)
+        return { ...output, code: output.code ?? 127 }
+      },
+    })
     const image = service.code === 0 ? await run(executable, ["image", "inspect", BOT_IMAGE], signal) : null
     return [
       check(
@@ -261,8 +269,10 @@ const containerChecks = async (
         service.code === 0 ? "pass" : "warn",
         service.code === 0
           ? `${engine} ready`
-          : "Container engine unavailable; check rootless user namespaces / daemon. Local bots remain available.",
-        `${engine} info`,
+          : probes.platform === "win32"
+            ? WINDOWS_VM_FIX
+            : "Container engine unavailable; check rootless user namespaces / daemon. Local bots remain available.",
+        probes.platform === "win32" ? WINDOWS_VM_FIX : `${engine} info`,
       ),
       check(
         "vm-image",
@@ -384,7 +394,7 @@ export const collectLocalChecks = async (
   ])
   checks.push(...claude, ...codex, ...opencode, ...logins)
   if (probes.platform !== "darwin") {
-    const pty = providerLoginPty(probes.platform, "provider", [])
+    const pty = providerLoginPty(probes.platform, "provider", [], environment.TOURI_DESKTOP_HELPER)
     const available = pty.supported && !!probes.which(pty.command, path)
     checks.push(
       check(
@@ -394,8 +404,10 @@ export const collectLocalChecks = async (
         !pty.supported
           ? pty.message
           : available
-            ? "PTY script disponível; o login atual usa importação de credenciais."
-            : "Instale util-linux para disponibilizar script. O login por importação continua disponível.",
+            ? `${probes.platform === "win32" ? "ConPTY" : "PTY script"} disponível; o login atual usa importação de credenciais.`
+            : probes.platform === "win32"
+              ? "Reinstale o aplicativo para disponibilizar o helper ConPTY. A importação continua disponível."
+              : "Instale util-linux para disponibilizar script. O login por importação continua disponível.",
       ),
     )
   }

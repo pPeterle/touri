@@ -24,6 +24,9 @@ export const machineCapability = (): MachineCapability => {
     : {
         available: false,
         provider: null,
-        reason: "Podman/Docker unavailable. Use local bots or install a container engine.",
+        reason:
+          process.platform === "win32"
+            ? "Docker Desktop with the WSL2 Linux engine is unavailable. Use local bots or start Docker Desktop."
+            : "Podman/Docker unavailable. Use local bots or install a container engine.",
       }
 }
