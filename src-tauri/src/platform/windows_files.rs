@@ -517,6 +517,18 @@ mod tests {
     fn directory_pins_prevent_ancestor_replacement() {
         let root = std::env::temp_dir().join(format!("touri-native-pin-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
+        // Exercise each setup boundary separately so a native failure identifies
+        // the API and path, rather than only reporting an opaque Win32 error.
+        let parent = fs::canonicalize(root.parent().unwrap()).expect("canonicalize fixture parent");
+        for ancestor in parent.ancestors().collect::<Vec<_>>().into_iter().rev() {
+            pin_dir(ancestor, false)
+                .unwrap_or_else(|error| panic!("pin ancestor {}: {error}", ancestor.display()));
+        }
+        let descriptor = Descriptor::private().expect("create current-user security descriptor");
+        descriptor.mkdir(&root).expect("create private directory");
+        let file = pin_dir(&root, true).expect("pin private directory");
+        descriptor.apply(&file).expect("apply protected DACL");
+        drop(file);
         let pins = Pinned::root(&root, true).unwrap();
         let moved = root.with_extension("moved");
         assert!(fs::rename(&root, &moved).is_err());
