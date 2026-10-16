@@ -389,8 +389,7 @@ pub fn run() {
                 }
             });
             app.set_menu(menu)?;
-            #[cfg(target_os = "macos")]
-            window_config::observe_display_changes(app.handle());
+            platform::observe_display_changes(app.handle());
             let mut launch =
                 SidecarLaunch::from_app(app.handle()).map_err(std::io::Error::other)?;
             let keychain = app.state::<AppState>().keychain.clone();
@@ -544,33 +543,27 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("error while running touri")
-        .run(|app, event| match event {
-            tauri::RunEvent::Ready => {
-                if !std::env::args().any(|arg| arg == "--hidden") {
-                    window_config::show_main(app, Some(window_config::restore(app)));
+        .run(|app, event| {
+            match event {
+                tauri::RunEvent::Ready => {
+                    if !std::env::args().any(|arg| arg == "--hidden") {
+                        window_config::show_main(app, Some(window_config::restore(app)));
+                    }
                 }
-                #[cfg(target_os = "macos")]
-                window_config::log_native_windows(app);
-            }
-            #[cfg(target_os = "macos")]
-            tauri::RunEvent::Reopen { .. } => window_config::show_main(app, None),
-            tauri::RunEvent::ExitRequested { .. } => stop_runtime(app),
-            #[cfg(target_os = "macos")]
-            tauri::RunEvent::Opened { urls } => {
-                for url in urls {
-                    deep_link::handle_url(app, url.as_str());
-                }
-            }
-            tauri::RunEvent::Resumed => {
-                if let Some(state) = app.try_state::<AppState>() {
-                    if let Ok(bridge) = state.host_bridge.lock() {
-                        if let Some(bridge) = bridge.as_ref() {
-                            let _ = bridge
-                                .send_notification("power.sleep", json!({ "sleeping": false }));
+
+                tauri::RunEvent::ExitRequested { .. } => stop_runtime(app),
+                tauri::RunEvent::Resumed => {
+                    if let Some(state) = app.try_state::<AppState>() {
+                        if let Ok(bridge) = state.host_bridge.lock() {
+                            if let Some(bridge) = bridge.as_ref() {
+                                let _ = bridge
+                                    .send_notification("power.sleep", json!({ "sleeping": false }));
+                            }
                         }
                     }
                 }
+                _ => {}
             }
-            _ => {}
+            platform::after_run_event(app, &event);
         });
 }

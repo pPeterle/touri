@@ -25,3 +25,9 @@ pub fn reveal(path: &str) -> Result<(), String> {
 pub fn permission_settings(_: &str) -> Result<(), String> {
     Err("Host computer use is not supported on Linux".into())
 }
+
+pub fn observe_display_changes<R: tauri::Runtime>(_: &tauri::AppHandle<R>) {}
+pub fn unhide_app<R: tauri::Runtime>(_: &tauri::AppHandle<R>) -> tauri::Result<()> {
+    Ok(())
+}
+pub fn after_run_event<R: tauri::Runtime>(_: &tauri::AppHandle<R>, _: &tauri::RunEvent) {}

@@ -321,8 +321,7 @@ pub fn show_main<R: Runtime>(app: &AppHandle<R>, initial: Option<WindowPlacement
         let Some(window) = handle.get_window("main") else {
             return;
         };
-        #[cfg(target_os = "macos")]
-        if let Err(error) = handle.show() {
+        if let Err(error) = crate::platform::unhide_app(&handle) {
             eprintln!("[window] unhide application failed: {error}");
         }
         if let Err(error) = window.unminimize() {
@@ -341,9 +340,6 @@ pub fn show_main<R: Runtime>(app: &AppHandle<R>, initial: Option<WindowPlacement
         eprintln!("[window] dispatch recovery failed: {error}");
     }
 }
-
-#[cfg(target_os = "macos")]
-pub use crate::platform::macos::window::{log_native_windows, observe_display_changes};
 
 #[cfg(test)]
 mod tests {

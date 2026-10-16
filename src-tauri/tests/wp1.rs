@@ -41,7 +41,8 @@ fn wp1_host_bridge_requires_authentication_before_dispatch() {
         callbacks,
     )
     .expect("host bridge starts");
-    let mut stream = std::os::unix::net::UnixStream::connect(&socket).expect("connect host bridge");
+    let mut stream =
+        touri_lib::platform::transport::connect(&bridge.endpoint()).expect("connect host bridge");
     use std::io::{BufRead, BufReader, Write};
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
@@ -77,7 +78,8 @@ fn wp1_quit_notification_is_sent_over_the_authenticated_bridge() {
         callbacks,
     )
     .expect("host bridge starts");
-    let mut stream = std::os::unix::net::UnixStream::connect(&socket).expect("connect host bridge");
+    let mut stream =
+        touri_lib::platform::transport::connect(&bridge.endpoint()).expect("connect host bridge");
     use std::io::{BufRead, BufReader, Write};
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
@@ -133,6 +135,7 @@ fn wp1_sidecar_handshake_and_bounded_restart_policy_are_automated() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn wp1_sidecar_restarts_after_kill_and_stops_on_quit() {
     let root = std::env::temp_dir().join(format!("touri-wp1-supervisor-{}", std::process::id()));
@@ -270,7 +273,7 @@ fn drop_grants_redeem_once_over_the_authenticated_bridge_only() {
         callbacks,
     )
     .expect("host bridge starts");
-    let mut stream = std::os::unix::net::UnixStream::connect(&socket).expect("connect");
+    let mut stream = touri_lib::platform::transport::connect(&bridge.endpoint()).expect("connect");
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .expect("timeout");
@@ -285,7 +288,8 @@ fn drop_grants_redeem_once_over_the_authenticated_bridge_only() {
     reader.read_line(&mut line).expect("read");
     let denied: serde_json::Value = serde_json::from_str(&line).expect("json");
     assert_eq!(denied["error"]["code"], AUTH_REQUIRED_CODE);
-    let mut stream = std::os::unix::net::UnixStream::connect(&socket).expect("connect again");
+    let mut stream =
+        touri_lib::platform::transport::connect(&bridge.endpoint()).expect("connect again");
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .expect("timeout");
@@ -306,7 +310,8 @@ fn drop_grants_redeem_once_over_the_authenticated_bridge_only() {
         .as_str()
         .expect("path")
         .ends_with("drop.txt"));
-    let mut stream = std::os::unix::net::UnixStream::connect(&socket).expect("connect third");
+    let mut stream =
+        touri_lib::platform::transport::connect(&bridge.endpoint()).expect("connect third");
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .expect("timeout");

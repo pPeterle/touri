@@ -29,13 +29,29 @@ pub fn listen(_: &Path) -> Result<(Listener, PathBuf), String> {
     ));
     Ok((listener, endpoint))
 }
-pub fn wake(path: &Path) {
+pub fn connect(path: &Path) -> std::io::Result<Stream> {
     #[cfg(unix)]
-    let _ = Stream::connect(path);
-    #[cfg(windows)]
-    if let Some(address) = path.to_str().and_then(|s| s.strip_prefix("tcp://")) {
-        let _ = Stream::connect(address);
+    {
+        Stream::connect(path)
     }
+    #[cfg(windows)]
+    {
+        let address = path
+            .to_str()
+            .and_then(|s| s.strip_prefix("tcp://"))
+            .and_then(|s| s.parse::<std::net::SocketAddr>().ok())
+            .filter(|address| address.ip() == std::net::Ipv4Addr::LOCALHOST && address.port() > 0)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "invalid loopback host bridge endpoint",
+                )
+            })?;
+        Stream::connect(address)
+    }
+}
+pub fn wake(path: &Path) {
+    let _ = connect(path);
 }
 pub fn cleanup(path: &Path) {
     #[cfg(unix)]
