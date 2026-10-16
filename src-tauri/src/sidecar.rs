@@ -475,6 +475,11 @@ fn spawn_sidecar<R: Runtime>(
     );
     let mut command = Command::new(binary);
     inherit_safe_environment(&mut command);
+    #[cfg(windows)]
+    command.env(
+        "TOURI_DESKTOP_HELPER",
+        std::env::current_exe().map_err(|error| error.to_string())?,
+    );
     command
         .arg("serve")
         .env("TOURI_UI_TOKEN", &ui_token)

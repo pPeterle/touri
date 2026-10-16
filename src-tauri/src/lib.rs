@@ -9,6 +9,7 @@ pub mod keychain;
 pub mod platform;
 pub mod power;
 pub mod preview;
+pub mod provider_login_pty;
 mod reports;
 pub mod secret_card;
 pub mod sidecar;
