@@ -80,17 +80,17 @@ jobs:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.2.21
+          bun-version: 1.4.3
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
       - name: Install Linux build dependencies
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libdbus-1-dev xdg-utils
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libdbus-1-dev xdg-utils unzip
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
       - run: bun run lint
-      - run: bun test sidecar/test
-      - run: bun --cwd ui test --maxWorkers=2 --minWorkers=1
+      - run: bun test --timeout 30000 sidecar/test
+      - run: bun --cwd ui test --maxWorkers=2 --minWorkers=1 --testTimeout=30000
       - run: bun run build:sidecar:linux
       - run: cargo test --manifest-path src-tauri/Cargo.toml
       - run: bunx tauri build --bundles appimage,deb

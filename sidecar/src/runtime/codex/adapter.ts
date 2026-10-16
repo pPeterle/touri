@@ -278,7 +278,10 @@ export const createCodexAdapter = ({
       const id = nextRequestId++
       return new Promise((resolve, reject) => {
         responseWaiters.set(id, { resolve, reject })
-        void writeLine({ stdin: spawned.stdin, value: { jsonrpc: "2.0", id, method, params } })
+        void writeLine({ stdin: spawned.stdin, value: { jsonrpc: "2.0", id, method, params } }).catch((error) => {
+          responseWaiters.delete(id)
+          reject(error instanceof Error ? error : new Error(String(error)))
+        })
       })
     }
     let finish: (
@@ -561,7 +564,7 @@ export const createCodexAdapter = ({
         void writeLine({
           stdin: spawned.stdin,
           value: { jsonrpc: "2.0", method: "turn/interrupt", params: { threadId: externalSessionId, turnId } },
-        })
+        }).catch(() => undefined)
       const killTimer = setTimeout(() => spawned.kill("SIGKILL"), interruptGraceMs)
       void onExit.finally(() => clearTimeout(killTimer))
     }

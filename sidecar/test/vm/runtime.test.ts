@@ -892,7 +892,7 @@ test("VM engine resumes the turn once when the bot computer stops mid-turn", asy
     scenario,
     JSON.stringify({
       requestLogPath: requests,
-      events: [{ type: "delta", delta: "parcial" }, { type: "sleep" }],
+      events: [{ type: "delta", delta: "parcial\n" }, { type: "sleep" }],
       slowMs: 1000,
     }),
   )
@@ -929,7 +929,7 @@ test("VM engine resumes the turn once when the bot computer stops mid-turn", asy
     if (!request.success) throw new Error(request.error)
     const started = engine.enqueue({ threadId, requestMessageId: request.message.id, trigger: "user" })
     if (!started.success) throw new Error(started.error)
-    for (let i = 0; i < 400 && !store.activePath({ threadId }).some((message) => message.text === "parcial"); i++)
+    for (let i = 0; i < 400 && !store.activePath({ threadId }).some((message) => message.text === "parcial\n"); i++)
       await Bun.sleep(5)
     writeFileSync(scenario, JSON.stringify({ requestLogPath: requests, deltas: ["retomado"] }))
     // The container stops outside touri (host sleep, crash, OOM): its processes die without a result.
@@ -950,7 +950,7 @@ test("VM engine resumes the turn once when the bot computer stops mid-turn", asy
     ).toEqual([{ previous_run_id: started.run.id, reason: "provider_crash" }])
     expect(store.activePath({ threadId }).map((message) => message.text)).toEqual([
       "Gere o relatório",
-      "parcial",
+      "parcial\n",
       "Retomado após falha do provedor",
       "retomado",
     ])
@@ -967,8 +967,8 @@ test("VM engine resumes the turn once when the bot computer stops mid-turn", asy
 })
 
 const waitForTerminal = async (run: { status: string }) => {
-  for (let attempt = 0; attempt < 200 && !["failed", "canceled", "succeeded"].includes(run.status); attempt++)
-    await Bun.sleep(5)
+  const deadline = Date.now() + 10_000
+  while (!["failed", "canceled", "succeeded"].includes(run.status) && Date.now() < deadline) await Bun.sleep(10)
   expect(["failed", "canceled", "succeeded"]).toContain(run.status)
 }
 

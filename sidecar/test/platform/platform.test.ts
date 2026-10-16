@@ -8,6 +8,7 @@ import * as windows from "../../src/platform/windows"
 
 test("data paths follow each platform and XDG/AppData overrides", () => {
   expect(linux.defaultDataRoot("/test-home", {})).toBe("/test-home/.local/share/touri")
+  expect(linux.defaultDataRoot("/test-home", { TOURI_HEADLESS: "1" })).toBe("/test-home/.touri")
   expect(linux.defaultDataRoot("/test-home", { XDG_DATA_HOME: "/data" })).toBe("/data/touri")
   expect(windows.defaultDataRoot("C:\\Users\\test", { APPDATA: "D:\\Data" })).toBe("D:\\Data\\touri")
   expect(macos.defaultDataRoot("/test-home")).toBe(posix.join("/test-home", "Library", "Application Support", "touri"))

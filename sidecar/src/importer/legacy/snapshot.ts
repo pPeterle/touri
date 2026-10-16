@@ -76,7 +76,9 @@ export const openLegacySnapshot = (path: string) => {
                   ? null
                   : type === 1 || type === 2
                     ? sqlite.sqlite3_column_double(handle, column)
-                    : new CString(sqlite.sqlite3_column_text(handle, column), 0, size).toString()
+                    : size === 0
+                      ? ""
+                      : new CString(sqlite.sqlite3_column_text(handle, column), 0, size).toString()
             }
             rows.push(row)
           }

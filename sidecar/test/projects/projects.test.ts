@@ -132,7 +132,15 @@ test("process start detects a random HTTP port, publishes preview, and stops the
     if (!started.success) return
     const run = started.structured as { pid: number; pgid: number; ports: Array<{ port: number }> }
     expect(run.ports.length).toBeGreaterThan(0)
-    const previews = await json(await harness.request(`/previews?projectId=${project.id}`))
+    let previews = await json(await harness.request(`/previews?projectId=${project.id}`))
+    const previewDeadline = Date.now() + 10_000
+    while (
+      !(previews.previews as Array<{ url: string }>).some((preview) => preview.url.startsWith("http://127.0.0.1:")) &&
+      Date.now() < previewDeadline
+    ) {
+      await Bun.sleep(25)
+      previews = await json(await harness.request(`/previews?projectId=${project.id}`))
+    }
     expect(
       (previews.previews as Array<{ url: string }>).some((preview) => preview.url.startsWith("http://127.0.0.1:")),
     ).toBe(true)

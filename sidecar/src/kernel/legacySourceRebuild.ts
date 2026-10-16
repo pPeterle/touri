@@ -77,7 +77,18 @@ const rebuildTable = (database: Database, table: string): void => {
 export const legacySourceRebuild = ({ database }: LegacySourceRebuildArgs): LegacySourceRebuildResult => {
   try {
     const pending = SOURCE_TABLES.filter((table) => needsRebuild(database, table))
-    for (const table of pending) rebuildTable(database, table)
+    if (pending.length) {
+      const previous = (database.query("PRAGMA legacy_alter_table").get() as { legacy_alter_table: number })
+        .legacy_alter_table
+      // External triggers briefly refer to the dropped table between DROP and RENAME.
+      // Keep their original references, then restore the caller's ALTER behavior.
+      database.exec("PRAGMA legacy_alter_table=ON")
+      try {
+        for (const table of pending) rebuildTable(database, table)
+      } finally {
+        database.exec(`PRAGMA legacy_alter_table=${previous ? "ON" : "OFF"}`)
+      }
+    }
 
     return { success: true, rebuilt: [...pending] }
   } catch (error) {

@@ -103,6 +103,7 @@ test("0014 upgrades a copy of a populated schema 13 database with old-label rows
     db.close()
     copyFileSync(original, filename)
     db = openDatabase({ filename })
+    expect(db.query("PRAGMA legacy_alter_table").get()).toEqual({ legacy_alter_table: 0 })
     for (let reopen = 0; reopen < 2; reopen++) {
       const after = snapshot(db, tables)
       expect(after.rows).toEqual(before.rows)
