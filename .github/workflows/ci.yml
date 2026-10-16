@@ -16,7 +16,8 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
       - run: bunx ajv-cli validate -s packages/contracts/mcp-tools.json -d packages/contracts/mcp-tools.json --spec=draft2020 --strict=false
-      - run: 'sqlite3 :memory: < packages/contracts/schema.sql'
+      - name: Apply the schema with bun:sqlite (FTS5)
+        run: bun -e 'import { Database } from "bun:sqlite"; import { readFileSync } from "node:fs"; new Database(":memory:").exec(readFileSync("packages/contracts/schema.sql", "utf8"))'
       - run: cmp packages/contracts/schema.sql sidecar/src/kernel/migrations/0001.sql
 
   sidecar:
