@@ -4,8 +4,8 @@
 
 # touri desktop
 
-touri is a local-first macOS app for running persistent AI teammates ("bots") on your own
-Codex, Claude Code or OpenCode CLI. Everything runs on your Mac: your conversations, memory, routines
+touri is a local-first desktop app for macOS and Linux for running persistent AI teammates ("bots") on your own
+Codex, Claude Code or OpenCode CLI. Everything runs on your computer: your conversations, memory, routines
 and secrets never leave the machine unless you explicitly configure a remote.
 
 Built with Tauri v2 (Rust shell), a Bun sidecar and a React UI.
@@ -18,14 +18,14 @@ Built with Tauri v2 (Rust shell), a Bun sidecar and a React UI.
 - Projects: connect a local repo, run supervised processes (databases, servers) and preview them in-app.
 - Agent browser with human take-over, and opt-in computer use with a visible indicator and kill switch.
 - MCP gateway with per-thread tokens and approval prompts.
-- Bot machines: optional isolated Linux VMs through Apple `container`.
+- Bot machines: Apple `container` on macOS; rootless Podman or Docker containers on Linux.
 - Importer for data exported by an earlier setup (see below).
 
 ## Privacy
 
-- Local-first: data lives in SQLite under `~/Library/Application Support/touri`.
+- Local-first: data lives in SQLite in the OS application data directory.
 - No telemetry and no account required.
-- Credentials are kept in the macOS Keychain, never in the database, logs or exports.
+- Desktop credentials use macOS Keychain or Linux Secret Service, never the database, logs or exports.
 - Optional cloud hosting is a separate, opt-in protocol (`docs/protocol/cloud-v1.md`).
 
 ## Install (GitHub Releases)
@@ -52,6 +52,8 @@ xattr -dr com.apple.quarantine /Applications/touri.app
 - Bun 1.2.21 or newer
 - Rust 1.90 or newer with the `aarch64-apple-darwin` target
 - A Codex or Claude Code CLI signed in on your Mac
+
+Linux build instructions and the Windows port status: [platform runbook](docs/runbooks/platforms.md).
 
 ## Build from source
 

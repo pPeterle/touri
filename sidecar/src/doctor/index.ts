@@ -1,7 +1,7 @@
-import { hostPlatform } from "../platform"
 import type { Database } from "bun:sqlite"
 import type { DoctorCheck, DoctorReport, Kernel } from "@touri/contracts"
 import { storageStats } from "../kernel/data-maintenance"
+import { hostPlatform } from "../platform"
 import { check } from "./check"
 import { createDoctorCommand } from "./command"
 import { collectLocalChecks, sidecarChecks } from "./local"
