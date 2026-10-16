@@ -349,7 +349,7 @@ for (const vm of [false, true])
     f.args.bot.anyFolderAccess = true
     const result = await f.adapter.startTurn(f.args)
     if (!vm && process.platform !== "darwin") {
-      expect(result).toMatchObject({ success: false, errorCode: "SPAWN_FAILED" })
+      expect(result).toMatchObject({ success: false, errorCode: "cli_crash" })
       if (!result.success) expect(result.error).toContain("sandbox do macOS")
       expect(f.calls).toHaveLength(0)
       return
