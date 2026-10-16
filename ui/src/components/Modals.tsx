@@ -1173,27 +1173,29 @@ export const BotSettingsModal = ({
               {api && <BotStandingGrants key={grantsRevision} api={api} botId={bot.id} />}
             </div>
           </SettingsGroup>
-          <SettingsGroup title="Controle do computador">
-            <label className="toggle-row" htmlFor="settings-computer-use">
-              <span>
-                <strong>{t("Computer use")}</strong>
-                <small>
-                  {machine.machine === "vm" && !machine.hostComputerUse
-                    ? t("Controls only Xvfb in the VM; cannot access the host screen.")
-                    : t("Off by default; each turn still needs a time-boxed grant.")}
-                </small>
-              </span>
-              <SettingsSwitch
-                id="settings-computer-use"
-                checked={bot.computerUse}
-                disabled={updating || saving}
-                onChange={(event) => {
-                  const computerUse = event.target.checked
-                  void immediateAction(() => actions.updateBot(bot.id, { computerUse }))
-                }}
-              />
-            </label>
-          </SettingsGroup>
+          {(hostComputerSupported || machine.machine !== "local") && (
+            <SettingsGroup title="Controle do computador">
+              <label className="toggle-row" htmlFor="settings-computer-use">
+                <span>
+                  <strong>{t("Computer use")}</strong>
+                  <small>
+                    {machine.machine === "vm" && !machine.hostComputerUse
+                      ? t("Controls only Xvfb in the VM; cannot access the host screen.")
+                      : t("Off by default; each turn still needs a time-boxed grant.")}
+                  </small>
+                </span>
+                <SettingsSwitch
+                  id="settings-computer-use"
+                  checked={bot.computerUse}
+                  disabled={updating || saving}
+                  onChange={(event) => {
+                    const computerUse = event.target.checked
+                    void immediateAction(() => actions.updateBot(bot.id, { computerUse }))
+                  }}
+                />
+              </label>
+            </SettingsGroup>
+          )}
         </SettingsPane>
         <SettingsPane {...botPane("mcp")}>
           {api && (

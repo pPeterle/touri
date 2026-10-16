@@ -1,11 +1,13 @@
 import type { Database } from "bun:sqlite"
-import { existsSync, readFileSync, statfsSync } from "node:fs"
+import { readFileSync, statfsSync } from "node:fs"
 import { freemem, homedir, release, totalmem } from "node:os"
 import { join } from "node:path"
 import type { DoctorCheck, Kernel } from "@touri/contracts"
 import { SCHEMA_VERSION } from "../kernel/db"
 import { hostPlatform, ociEngine, platformFor } from "../platform"
+import { containerKernelPresent } from "../platform/macos"
 import { appleContainerChecks } from "../platform/macos/doctor-local"
+import { providerLoginPty } from "../platform/provider-login"
 import { touriVersion } from "../version"
 import { BOT_IMAGE, imageContext } from "../vm/image"
 import { check, shellQuote } from "./check"
@@ -36,8 +38,7 @@ export const localProbes: LocalProbes = {
     const fs = statfsSync(path)
     return fs.bavail * fs.bsize
   },
-  kernelPresent: () =>
-    existsSync(join(homedir(), "Library/Application Support/com.apple.container/kernels/default.kernel-arm64")),
+  kernelPresent: containerKernelPresent,
   memory: () => ({ total: totalmem(), free: freemem() }),
   prepareImage: imageContext,
 }
@@ -304,7 +305,9 @@ export const keychainCheck = async (kernel: Kernel, signal: AbortSignal, probes:
       "keychain",
       hostPlatform.secretStoreLabel,
       "warn",
-      "O cofre nativo está disponível apenas no aplicativo desktop do macOS. O modo servidor usa seu próprio cofre local.",
+      probes.platform === "darwin"
+        ? "O cofre nativo está disponível apenas no aplicativo desktop do macOS. O modo servidor usa seu próprio cofre local."
+        : "O cofre nativo está disponível no aplicativo desktop. O modo servidor usa seu próprio cofre local.",
       hostPlatform.appOpenCommand,
     )
   try {
@@ -320,7 +323,9 @@ export const keychainCheck = async (kernel: Kernel, signal: AbortSignal, probes:
       result.success ? "pass" : "fail",
       result.success
         ? "Consulta ao cofre nativo concluída pelo aplicativo. Nenhuma credencial foi exibida ou registrada."
-        : "O aplicativo não conseguiu acessar o cofre nativo. Abra Acesso às Chaves e verifique o desbloqueio e as permissões do touri.",
+        : probes.platform === "darwin"
+          ? "O aplicativo não conseguiu acessar o cofre nativo. Abra Acesso às Chaves e verifique o desbloqueio e as permissões do touri."
+          : "O aplicativo não conseguiu acessar o cofre nativo. Desbloqueie o serviço de segredos da sessão.",
       hostPlatform.secretStoreFix,
     )
   } catch {
@@ -378,6 +383,22 @@ export const collectLocalChecks = async (
     providerLoginChecks(kernel, environment.HOME ?? homedir(), signal),
   ])
   checks.push(...claude, ...codex, ...opencode, ...logins)
+  if (probes.platform !== "darwin") {
+    const pty = providerLoginPty(probes.platform, "provider", [])
+    const available = pty.supported && !!probes.which(pty.command, path)
+    checks.push(
+      check(
+        "provider-login-pty",
+        "Login · terminal",
+        available ? "pass" : "warn",
+        !pty.supported
+          ? pty.message
+          : available
+            ? "PTY script disponível; o login atual usa importação de credenciais."
+            : "Instale util-linux para disponibilizar script. O login por importação continua disponível.",
+      ),
+    )
+  }
   for (const [name, command] of [...platformFor(probes.platform).installTools]) {
     if (!name || !command) continue
     const resolved = probes.which(name, path)

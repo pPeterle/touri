@@ -51,3 +51,12 @@ test("PTY adapters keep commands as arguments and explain the Windows limitation
     message: expect.stringContaining("ConPTY"),
   })
 })
+
+test("Linux process identity handles parenthesized names and refuses malformed/reused PIDs", () => {
+  const fields = ["S", "7", ...Array(17).fill("0"), "123456"]
+  const stat = `42 (process (with) spaces) ${fields.join(" ")}`
+  expect(linux.parseProcessIdentity(42, stat)).toEqual({ startTime: "linux:123456", parentPid: 7, alive: true })
+  expect(linux.parseProcessIdentity(43, stat)).toBeNull()
+  expect(linux.parseProcessIdentity(42, "42 (broken) S 7")).toBeNull()
+  expect(linux.parseProcessIdentity(42, stat.replace(") S", ") Z"))?.alive).toBe(false)
+})

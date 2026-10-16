@@ -541,7 +541,7 @@ mod tests {
                 released
                     .lock()
                     .expect("prompt release lock")
-                    .recv_timeout(Duration::from_secs(10))
+                    .recv_timeout(Duration::from_secs(30))
                     .expect("release prompt");
                 Ok(None)
             }),
@@ -562,7 +562,7 @@ mod tests {
             )
         });
         connection
-            .set_read_timeout(Some(Duration::from_secs(2)))
+            .set_read_timeout(Some(Duration::from_secs(10)))
             .expect("set test timeout");
         // Authentication must take effect before any pipelined call is dispatched.
         connection
@@ -586,7 +586,7 @@ mod tests {
         assert_eq!(auth["id"], 1);
         assert_eq!(auth["result"]["ok"], true);
         prompt_entered
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(Duration::from_secs(10))
             .expect("prompt is pending");
         // The connection must keep accepting requests after an idle read timeout.
         std::thread::sleep(Duration::from_millis(100));

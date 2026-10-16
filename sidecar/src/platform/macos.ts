@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs"
 import { homedir, release } from "node:os"
 import { join } from "node:path"
 import type { MachineCapability } from "@touri/contracts"
@@ -27,3 +28,6 @@ export const installTools = [
 ]
 
 export const systemSettingsCommand = "open /System/Applications/System\\\\ Settings.app"
+
+export const containerKernelPresent = () =>
+  existsSync(join(homedir(), "Library/Application Support/com.apple.container/kernels/default.kernel-arm64"))

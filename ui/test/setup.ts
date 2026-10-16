@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest"
-import { afterEach } from "vitest"
+import { afterEach, vi } from "vitest"
 
 afterEach(() => localStorage.clear())
 
@@ -22,4 +22,8 @@ Object.defineProperty(HTMLCanvasElement.prototype, "getContext", {
   value: () => null,
 })
 
-Object.defineProperty(navigator, "userAgent", { configurable: true, value: "Mozilla/5.0 (Macintosh; Intel Mac OS X)" })
+// Native permission fixtures emulate a supported host without changing keyboard platform detection.
+vi.mock("../src/platform", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/platform")>()),
+  hostComputerSupported: true,
+}))

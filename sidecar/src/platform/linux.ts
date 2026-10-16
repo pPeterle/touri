@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 export const defaultDataRoot = (home = homedir(), env = process.env) =>
@@ -15,3 +16,27 @@ export const installTools = [
 ]
 
 export const systemSettingsCommand = "Review system network and proxy settings"
+
+export type ProcessIdentity = { startTime: string; parentPid: number; alive: boolean }
+/** /proc start ticks identify PID reuse without launching a subprocess during startup. */
+export const parseProcessIdentity = (pid: number, stat: string): ProcessIdentity | null => {
+  const start = stat.indexOf("(")
+  const end = stat.lastIndexOf(")")
+  if (start < 1 || end <= start || Number(stat.slice(0, start).trim()) !== pid) return null
+  const fields = stat
+    .slice(end + 1)
+    .trim()
+    .split(/\s+/)
+  const parentPid = Number(fields[1])
+  const ticks = fields[19]
+  if (!Number.isSafeInteger(parentPid) || parentPid < 0 || !ticks || !/^\d+$/.test(ticks)) return null
+  return { startTime: `linux:${ticks}`, parentPid, alive: !/^[ZX]$/.test(fields[0] ?? "") }
+}
+export const processIdentity = (pid: number): ProcessIdentity | null => {
+  if (!Number.isSafeInteger(pid) || pid < 1) return null
+  try {
+    return parseProcessIdentity(pid, readFileSync(`/proc/${pid}/stat`, "utf8"))
+  } catch {
+    return null
+  }
+}

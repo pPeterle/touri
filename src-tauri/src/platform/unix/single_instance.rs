@@ -180,7 +180,9 @@ mod tests {
         assert!(is_private_directory(&dir));
         let canonical = std::fs::canonicalize(&dir).unwrap();
         assert!(!canonical.starts_with("/private/tmp"));
+        #[cfg(target_os = "macos")]
         assert!(!canonical.starts_with("/tmp"));
+        assert_ne!(canonical, std::env::temp_dir());
     }
 
     #[test]

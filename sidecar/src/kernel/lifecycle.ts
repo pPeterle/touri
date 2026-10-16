@@ -2,6 +2,7 @@ import { dlopen, read } from "bun:ffi"
 import { closeSync, constants, fchmodSync, fstatSync, ftruncateSync, openSync, readSync, writeSync } from "node:fs"
 import { join } from "node:path"
 import type { AppPaths } from "@touri/contracts"
+import { processIdentity as linuxProcessIdentity } from "../platform/linux"
 import { closeOnExec, errnoSymbol, libcLibrary, wouldBlock } from "../platform/posix"
 import { ensurePrivateDirectory } from "./files"
 
@@ -24,6 +25,7 @@ const signal = (pid: number, kind: "SIGTERM" | "SIGKILL") => {
 }
 
 const identity = (pid: number): Identity | null => {
+  if (process.platform === "linux") return linuxProcessIdentity(pid)
   const result = Bun.spawnSync({
     cmd: ["/bin/ps", "-o", "stat=,ppid=,lstart=", "-p", String(pid)],
     env: { PATH: "/usr/bin:/bin", LC_ALL: "C" },

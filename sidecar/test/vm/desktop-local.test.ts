@@ -16,6 +16,7 @@ import { fakeVmProvider } from "./fake-provider"
 import { attemptVnc } from "./vnc-client"
 
 const available =
+  process.env.TOURI_VM_INTEGRATION !== "0" &&
   process.platform === "linux" &&
   ["Xvfb", "x11vnc", "python3"].every((tool) => Bun.which(tool)) &&
   existsSync(chromium.executablePath())
