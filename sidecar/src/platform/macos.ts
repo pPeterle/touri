@@ -1,6 +1,9 @@
 import { existsSync } from "node:fs"
 import { homedir, release } from "node:os"
-import { join } from "node:path"
+import { posix } from "node:path"
+
+const { join } = posix
+
 import type { MachineCapability } from "@touri/contracts"
 export const defaultDataRoot = (home = homedir()) => join(home, "Library", "Application Support", "touri")
 export const machineCapability = (): MachineCapability => {

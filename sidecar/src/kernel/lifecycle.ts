@@ -4,13 +4,17 @@ import { join } from "node:path"
 import type { AppPaths } from "@touri/contracts"
 import { processIdentity as linuxProcessIdentity } from "../platform/linux"
 import { closeOnExec, errnoSymbol, libcLibrary, wouldBlock } from "../platform/posix"
+import { acquireWindowsRuntimeLock, watchWindowsParent } from "../platform/windows-native"
 import { ensurePrivateDirectory } from "./files"
 
-const native = dlopen(libcLibrary, {
-  flock: { args: ["i32", "i32"], returns: "i32" },
-  getppid: { args: [], returns: "i32" },
-  [errnoSymbol]: { args: [], returns: "ptr" },
-}).symbols
+const openNative = () =>
+  dlopen(libcLibrary, {
+    flock: { args: ["i32", "i32"], returns: "i32" },
+    getppid: { args: [], returns: "i32" },
+    [errnoSymbol]: { args: [], returns: "ptr" },
+  }).symbols
+let cachedNative: ReturnType<typeof openNative> | undefined
+const native = () => (cachedNative ??= openNative())
 
 type Identity = { startTime: string; parentPid: number; alive: boolean }
 type Owner = { pid: number; startTime: string; parentPid: number | null }
@@ -47,9 +51,12 @@ export const acquireRuntimeLock = async (
   paths: AppPaths,
   {
     timeoutMs = 10_000,
-    parentPid = Number(process.env.TOURI_PARENT_PID ?? native.getppid()),
+    parentPid = Number(
+      process.env.TOURI_PARENT_PID ?? (process.platform === "win32" ? process.ppid : native().getppid()),
+    ),
   }: { timeoutMs?: number; parentPid?: number | null } = {},
 ): Promise<{ release: () => void }> => {
+  if (process.platform === "win32") return acquireWindowsRuntimeLock(paths, timeoutMs)
   ensurePrivateDirectory({ root: paths.appData, path: paths.runDir })
   const fd = openSync(
     join(paths.runDir, "runtime.lock"),
@@ -61,8 +68,8 @@ export const acquireRuntimeLock = async (
   try {
     if (!fstatSync(fd).isFile()) throw new Error("Lock do runtime inválido")
     fchmodSync(fd, 0o600)
-    while (native.flock(fd, 2 | 4) !== 0) {
-      const pointer = native[errnoSymbol]?.()
+    while (native().flock(fd, 2 | 4) !== 0) {
+      const pointer = native()[errnoSymbol]?.()
       const errno = pointer ? read.i32(pointer) : 0
       if (errno !== wouldBlock) throw new Error(`Falha no lock do runtime (${errno})`)
       let owner: Owner | null = null
@@ -122,9 +129,10 @@ export const watchParent = (
   shutdown: () => void,
   parentPid = Number(process.env.TOURI_PARENT_PID ?? process.ppid),
 ): (() => void) => {
+  if (process.platform === "win32") return watchWindowsParent(shutdown, parentPid)
   const check = () => {
     // Bun's process.ppid can retain the launch-time value after reparenting.
-    if (parentPid <= 1 || native.getppid() !== parentPid) shutdown()
+    if (parentPid <= 1 || native().getppid() !== parentPid) shutdown()
   }
   const timer = setInterval(check, 250)
   timer.unref()

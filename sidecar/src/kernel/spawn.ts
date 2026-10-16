@@ -2,6 +2,7 @@ import { dlopen } from "bun:ffi"
 import { closeSync, createWriteStream, existsSync, read as readFd, write as writeFd } from "node:fs"
 import type { Kernel } from "@touri/contracts"
 import { libcLibrary } from "../platform/posix"
+import { desktopHelper } from "../platform/windows-native"
 
 type SpawnResult = ReturnType<Kernel["spawnTree"]>
 
@@ -133,6 +134,12 @@ export const spawnTree = ({
   extraFds?: number
 }): SpawnResult => {
   try {
+    if (process.platform === "win32" && extraFds > 0)
+      return {
+        success: false,
+        errorCode: "SPAWN_FAILED",
+        error: "Windows local browser pipe descriptors are unavailable; use the VM browser",
+      }
     const spawn = () => {
       const stdio: ["pipe", "pipe", "pipe", ...Array<"socket-fd" | "pipe">] = [
         "pipe",
@@ -140,7 +147,13 @@ export const spawnTree = ({
         "pipe",
         ...Array.from({ length: extraFds }, () => extraPipeMode),
       ]
-      return Bun.spawn({ cmd: [cmd, ...args], cwd, env, detached: true, stdio })
+      return Bun.spawn({
+        cmd: process.platform === "win32" ? [desktopHelper(), "--spawn-tree", "--", cmd, ...args] : [cmd, ...args],
+        cwd,
+        env,
+        detached: process.platform !== "win32",
+        stdio,
+      })
     }
     const child = (() => {
       try {

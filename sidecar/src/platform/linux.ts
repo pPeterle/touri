@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
-import { join } from "node:path"
+import { posix } from "node:path"
+
+const { join } = posix
 export const defaultDataRoot = (home = homedir(), env = process.env) =>
   env.TOURI_HEADLESS === "1" ? join(home, ".touri") : join(env.XDG_DATA_HOME || join(home, ".local", "share"), "touri")
 export const secretStoreLabel = "Secret Service"

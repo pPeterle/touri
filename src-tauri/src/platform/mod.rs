@@ -9,6 +9,8 @@ pub mod transport;
 #[cfg(target_os = "windows")]
 mod windows;
 #[cfg(windows)]
+pub mod windows_files;
+#[cfg(windows)]
 pub(crate) mod windows_job;
 #[cfg(target_os = "linux")]
 pub use linux::*;

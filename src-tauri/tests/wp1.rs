@@ -253,6 +253,7 @@ fn icon_pngs_are_eight_bit_rgba() {
 }
 
 #[test]
+#[cfg(unix)]
 fn drop_grants_redeem_once_over_the_authenticated_bridge_only() {
     use std::io::{BufRead, BufReader, Write};
     let root = std::env::temp_dir().join(format!("touri-drop-bridge-{}", std::process::id()));
@@ -330,4 +331,20 @@ fn drop_grants_redeem_once_over_the_authenticated_bridge_only() {
     assert!(replay["error"].is_object());
     bridge.shutdown();
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_drop_grants_fail_closed_until_native_identity_is_implemented() {
+    let root = std::env::temp_dir().join(format!("touri-drop-unsupported-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("fixture.txt");
+    std::fs::write(&path, "fixture").unwrap();
+    let outcome = touri_lib::file_grants::FileGrants::new().issue(&[path]);
+    assert!(outcome.granted.is_empty());
+    assert_eq!(
+        outcome.rejected[0].reason,
+        touri_lib::file_grants::RejectReason::Unsupported
+    );
+    std::fs::remove_dir_all(root).unwrap();
 }

@@ -5,15 +5,19 @@ import { basename, dirname, resolve } from "node:path"
 import { openWorkspaceDirectory } from "../kernel/files"
 import { canonicalSystemPath, errnoSymbol, libcLibrary } from "../platform/posix"
 
-const native = dlopen(libcLibrary, {
-  openat: { args: ["i32", "cstring", "i32", "u32"], returns: "i32" },
-  [errnoSymbol]: { args: [], returns: "ptr" },
-  linkat: { args: ["i32", "cstring", "i32", "cstring", "i32"], returns: "i32" },
-  renameat: { args: ["i32", "cstring", "i32", "cstring"], returns: "i32" },
-  unlinkat: { args: ["i32", "cstring", "i32"], returns: "i32" },
-}).symbols
+const openNative = () =>
+  dlopen(libcLibrary, {
+    openat: { args: ["i32", "cstring", "i32", "u32"], returns: "i32" },
+    [errnoSymbol]: { args: [], returns: "ptr" },
+    linkat: { args: ["i32", "cstring", "i32", "cstring", "i32"], returns: "i32" },
+    renameat: { args: ["i32", "cstring", "i32", "cstring"], returns: "i32" },
+    unlinkat: { args: ["i32", "cstring", "i32"], returns: "i32" },
+  }).symbols
+let cachedNative: ReturnType<typeof openNative> | undefined
+const native = () => (cachedNative ??= openNative())
+
 const errno = () => {
-  const pointer = native[errnoSymbol]?.()
+  const pointer = native()[errnoSymbol]?.()
   return pointer ? read.i32(pointer) : 0
 }
 const c = (value: string) => Buffer.from(`${value}\0`)
@@ -33,7 +37,7 @@ export const atomicDownload = async (
   let published = false
   let backup: string | undefined
   const validate = () => {
-    const existing = native.openat(
+    const existing = native().openat(
       directory,
       c(name),
       constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
@@ -54,7 +58,7 @@ export const atomicDownload = async (
   const reader = response.body.getReader()
   try {
     validate()
-    fd = native.openat(
+    fd = native().openat(
       directory,
       c(temporary),
       constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
@@ -76,28 +80,28 @@ export const atomicDownload = async (
     sync(directory)
     if (existed) {
       backup = `.touri-${randomBytes(16).toString("hex")}.backup`
-      if (native.linkat(directory, c(name), directory, c(backup), 0) < 0)
+      if (native().linkat(directory, c(name), directory, c(backup), 0) < 0)
         throw new Error("Não foi possível preservar o snapshot anterior")
     }
-    if (native.renameat(directory, c(temporary), directory, c(name)) < 0)
+    if (native().renameat(directory, c(temporary), directory, c(name)) < 0)
       throw new Error("Não foi possível publicar o snapshot")
     published = true
     try {
       sync(directory)
     } catch (error) {
       if (backup) {
-        if (native.renameat(directory, c(backup), directory, c(name)) < 0)
+        if (native().renameat(directory, c(backup), directory, c(name)) < 0)
           throw new Error("Falha ao restaurar snapshot anterior")
         backup = undefined
-      } else native.unlinkat(directory, c(name), 0)
+      } else native().unlinkat(directory, c(name), 0)
       throw error
     }
   } finally {
     await reader.cancel().catch(() => {})
     reader.releaseLock()
     if (fd !== undefined && fd >= 0) closeSync(fd)
-    if (!published) native.unlinkat(directory, c(temporary), 0)
-    if (backup) native.unlinkat(directory, c(backup), 0)
+    if (!published) native().unlinkat(directory, c(temporary), 0)
+    if (backup) native().unlinkat(directory, c(backup), 0)
     closeSync(directory)
   }
 }

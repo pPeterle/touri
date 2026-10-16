@@ -6,7 +6,10 @@ use std::io::{self, Read, Write};
 const FLAG: &str = "--provider-login-pty";
 
 fn command(mut args: Vec<OsString>) -> Result<Option<Vec<OsString>>, &'static str> {
-    if args.first().is_none_or(|arg| arg != FLAG) {
+    if args
+        .first()
+        .is_none_or(|arg| arg != FLAG && arg != "--spawn-tree")
+    {
         return Ok(None);
     }
     if args.get(1).is_none_or(|arg| arg != "--") || args.get(2).is_none_or(|arg| arg.is_empty()) {
@@ -17,9 +20,16 @@ fn command(mut args: Vec<OsString>) -> Result<Option<Vec<OsString>>, &'static st
 
 /// Returns None for an ordinary desktop launch. Arguments never pass through a shell.
 pub fn entry(args: Vec<OsString>) -> Option<i32> {
+    let piped = args.first().is_some_and(|arg| arg == "--spawn-tree");
     let result = match command(args) {
         Ok(None) => return None,
-        Ok(Some(args)) => run(args),
+        Ok(Some(args)) => {
+            if piped {
+                run_piped(args)
+            } else {
+                run(args)
+            }
+        }
         Err(error) => Err(error.to_owned()),
     };
     Some(match result {
@@ -29,6 +39,24 @@ pub fn entry(args: Vec<OsString>) -> Option<i32> {
             2
         }
     })
+}
+
+#[cfg(not(windows))]
+fn run_piped(_: Vec<OsString>) -> Result<i32, String> {
+    Err("The native process helper is Windows-only".into())
+}
+#[cfg(windows)]
+fn run_piped(args: Vec<OsString>) -> Result<i32, String> {
+    let job = super::platform::windows_job::own_process_tree().map_err(|e| e.to_string())?;
+    std::mem::forget(job);
+    std::process::Command::new(&args[0])
+        .args(&args[1..])
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+        .map(|status| status.code().unwrap_or(1))
+        .map_err(|e| e.to_string())
 }
 
 // Flush prompts that do not end in a newline. No terminal output is logged here.

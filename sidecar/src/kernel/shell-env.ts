@@ -1,5 +1,6 @@
 import { existsSync, readdirSync } from "node:fs"
 import { homedir } from "node:os"
+import { win32 } from "node:path"
 import type { Kernel } from "@touri/contracts"
 import { defaultShell, extraToolDirectories } from "../platform/posix"
 import { withDeadline } from "./policy"
@@ -42,7 +43,22 @@ export const parseEnvOutput = ({ output, marker }: { output: string; marker: str
   return parsed
 }
 
-const toolDirectories = ({ home, exists }: { home: string; exists: (path: string) => boolean }): Array<string> => {
+const toolDirectories = ({
+  home,
+  exists,
+  platform,
+}: {
+  home: string
+  exists: (path: string) => boolean
+  platform: string
+}): Array<string> => {
+  if (platform === "win32")
+    return [
+      win32.join(home, ".local", "bin"),
+      win32.join(home, ".bun", "bin"),
+      win32.join(home, ".cargo", "bin"),
+      win32.join(process.env.APPDATA || win32.join(home, "AppData", "Roaming"), "npm"),
+    ].filter(exists)
   const nvmRoot = `${home}/.nvm/versions/node`
   const nvmBins = exists(nvmRoot)
     ? readdirSync(nvmRoot)
@@ -71,19 +87,33 @@ export const mergePath = ({
   path,
   home,
   exists = existsSync,
+  platform = process.platform,
 }: {
   path: string | undefined
   home: string
   exists?: (path: string) => boolean
+  platform?: string
 }): string => {
-  const existing = (path ?? "").split(":").filter((entry) => entry.length > 0)
-  const merged = [...existing, ...toolDirectories({ home, exists })]
-  return merged.filter((entry, index) => merged.indexOf(entry) === index).join(":")
+  const delimiter = platform === "win32" ? ";" : ":"
+  const existing = (path ?? "").split(delimiter).filter((entry) => entry.length > 0)
+  const merged = [...existing, ...toolDirectories({ home, exists, platform })]
+  return merged
+    .filter(
+      (entry, index) =>
+        merged.findIndex((other) =>
+          platform === "win32" ? other.toLowerCase() === entry.toLowerCase() : other === entry,
+        ) === index,
+    )
+    .join(delimiter)
 }
 
 const withToolPath = (environment: NodeJS.ProcessEnv | Record<string, string>): Record<string, string> => {
   const result = buildChildEnv({ base: environment })
-  return { ...result, PATH: mergePath({ path: result.PATH, home: result.HOME ?? homedir() }) }
+  const pathKey =
+    process.platform === "win32" ? (Object.keys(result).find((key) => key.toUpperCase() === "PATH") ?? "PATH") : "PATH"
+  const path = result[pathKey]
+  if (pathKey !== "PATH") delete result[pathKey]
+  return { ...result, PATH: mergePath({ path, home: result.HOME ?? result.USERPROFILE ?? homedir() }) }
 }
 
 export const createShellEnv = ({ spawn, shell }: { spawn: Kernel["spawnTree"]; shell?: string }) => {
@@ -92,6 +122,7 @@ export const createShellEnv = ({ spawn, shell }: { spawn: Kernel["spawnTree"]; s
   let disposed = false
 
   const load = async (): Promise<Record<string, string>> => {
+    if (process.platform === "win32") return withToolPath(process.env)
     const marker = "__TOURI_ENV__"
     const child = spawn({
       cmd: shell ?? process.env.SHELL ?? defaultShell,

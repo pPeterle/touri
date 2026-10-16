@@ -1,0 +1,125 @@
+import { join } from "node:path"
+import type { AppPaths } from "@touri/contracts"
+import { TouriError } from "../kernel/errors"
+import { withDeadline } from "../kernel/policy"
+import { buildChildEnv } from "../kernel/shell-env"
+
+export const desktopHelper = (): string => {
+  const helper = process.env.TOURI_DESKTOP_HELPER
+  if (!helper) throw new Error("Windows runtime requires the installed desktop helper (TOURI_DESKTOP_HELPER)")
+  return helper
+}
+
+export const nativeFileOperation = <T>(
+  op: string,
+  input: { root: string; path: string; content?: string; to?: string; max_bytes?: number },
+): T => {
+  const child = Bun.spawnSync({
+    cmd: [desktopHelper(), "--native-fs"],
+    stdin: Buffer.from(JSON.stringify({ op, ...input })),
+    stdout: "pipe",
+    stderr: "pipe",
+    env: buildChildEnv(),
+    timeout: 10_000,
+  })
+  let response: { ok?: boolean; value?: T; code?: string }
+  try {
+    response = JSON.parse(child.stdout.toString())
+  } catch {
+    throw new TouriError("TOURI-E2001")
+  }
+  if (!response.ok)
+    throw new TouriError(
+      response.code === "TOURI-E2000" ? "TOURI-E2000" : response.code === "TOURI-E2002" ? "TOURI-E2002" : "TOURI-E2001",
+    )
+  return response.value as T
+}
+
+export const acquireWindowsRuntimeLock = async (
+  paths: AppPaths,
+  timeoutMs = 10_000,
+): Promise<{ release: () => void }> => {
+  const started = Date.now()
+  while (true) {
+    const child = Bun.spawn({
+      cmd: [desktopHelper(), "--native-lock"],
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "ignore",
+      env: buildChildEnv(),
+    })
+    child.stdin.write(
+      `${JSON.stringify({ op: "lock", root: paths.appData, path: join(paths.runDir, "runtime.lock") })}\n`,
+    )
+    child.stdin.flush()
+    const reader = child.stdout.getReader()
+    let ready = false
+    try {
+      ready = await withDeadline({
+        timeoutMs: Math.min(timeoutMs, 3000),
+        operation: async () => {
+          let text = ""
+          while (!text.includes("\n") && text.length < 4096) {
+            const chunk = await reader.read()
+            if (chunk.done) break
+            text += new TextDecoder().decode(chunk.value)
+          }
+          return text.trim() === "locked"
+        },
+      })
+    } catch {
+      /* An exited or wedged helper cannot grant a lease. */
+    } finally {
+      reader.releaseLock()
+    }
+    if (ready) {
+      let released = false
+      void child.exited.then(() => {
+        if (!released) {
+          if (process.listenerCount("SIGTERM")) process.emit("SIGTERM")
+          else process.exit(1)
+        }
+      })
+      return {
+        release: () => {
+          released = true
+          child.stdin.end()
+        },
+      }
+    }
+    child.kill()
+    await child.exited
+    if (Date.now() - started >= timeoutMs)
+      throw new Error("Another runtime owns this data directory, or the native Windows lock is unavailable")
+    await Bun.sleep(50)
+  }
+}
+
+export const watchWindowsParent = (shutdown: () => void, parentPid: number): (() => void) => {
+  if (!Number.isSafeInteger(parentPid) || parentPid <= 1) {
+    shutdown()
+    return () => {}
+  }
+  const child = Bun.spawn({
+    cmd: [desktopHelper(), "--watch-parent", String(parentPid)],
+    stdin: "pipe",
+    stdout: "ignore",
+    stderr: "ignore",
+    env: buildChildEnv(),
+  })
+  let stopped = false
+  const keepAlive = setInterval(() => {
+    void child.pid
+  }, 1000)
+  keepAlive.unref()
+  void child.exited.then(() => {
+    clearInterval(keepAlive)
+    if (!stopped) shutdown()
+  })
+  return () => {
+    stopped = true
+    clearInterval(keepAlive)
+    child.stdin.end()
+    child.kill()
+  }
+}

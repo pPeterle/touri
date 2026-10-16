@@ -1,5 +1,7 @@
 use std::collections::VecDeque;
-use std::fs::{create_dir_all, metadata, remove_file, rename, OpenOptions};
+#[cfg(unix)]
+use std::fs::create_dir_all;
+use std::fs::{metadata, remove_file, rename, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -746,13 +748,19 @@ fn append_sidecar_log_line(filename: &Path, line: &str, source: &str) {
 
 /// Owner-only from the first byte: other macOS accounts never see app data or logs.
 fn create_private_dir(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    return crate::platform::windows_files::ensure_private_directory(path);
+    #[cfg(unix)]
     create_dir_all(path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
     }
-    Ok(())
+    #[cfg(unix)]
+    {
+        Ok(())
+    }
 }
 
 fn private_append_options() -> OpenOptions {

@@ -7,6 +7,7 @@ const fixture = () => {
   const calls: string[][] = []
   const provider = createOciProvider({
     engine: "podman",
+    platform: "linux",
     run: async (args) => {
       calls.push(args)
       return ok()
@@ -59,6 +60,7 @@ test("engine failure explains local fallback without attempting privileged start
   const calls: string[][] = []
   const provider = createOciProvider({
     engine: "podman",
+    platform: "linux",
     run: async (args) => {
       calls.push(args)
       return { code: 125, stdout: "", stderr: "namespace unavailable" }
