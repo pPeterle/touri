@@ -129,6 +129,13 @@ const AppContent = ({ kernel }: AppProps) => {
   )
   useEffect(() => saveWorkspaceState({ route }), [route])
   const [localNotice, setLocalNotice] = useState<string | null>(null)
+  const noticeTimer = useRef<number | null>(null)
+  useEffect(
+    () => () => {
+      if (noticeTimer.current !== null) window.clearTimeout(noticeTimer.current)
+    },
+    [],
+  )
   const [searchOpen, setSearchOpen] = useState(false)
   const [notificationsOpen, setNotificationsOpen] = useState(false)
   const unavailableApi = useMemo<UiApi>(
@@ -405,8 +412,12 @@ const AppContent = ({ kernel }: AppProps) => {
 
   const notice = localNotice ?? data.notice
   const showNotice = (message: string): void => {
+    if (noticeTimer.current !== null) window.clearTimeout(noticeTimer.current)
     setLocalNotice(userFacingError(message))
-    window.setTimeout(() => setLocalNotice(null), 4200)
+    noticeTimer.current = window.setTimeout(() => {
+      noticeTimer.current = null
+      setLocalNotice(null)
+    }, 4200)
   }
   const openModal = (kind: ModalKind): void => {
     if (kind !== "settings" && kind !== "doctor" && kind !== "bot-settings") setSettingFocus(null)
