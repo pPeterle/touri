@@ -1,4 +1,5 @@
 mod keychain;
+pub mod window;
 pub use keychain::{KeychainStore, PRODUCTION_SERVICE};
 use std::process::Command;
 pub const HOST_COMPUTER: bool = true;

@@ -1,4 +1,5 @@
 import type { MessagePart } from "@touri/contracts"
+import { pathLeaf } from "../platform"
 import { type MascotState, mascotLabel } from "./mascotState"
 import { approvalMatchesTool, toolLeaf, toolPresentation, toolStatus } from "./toolPresentation"
 
@@ -48,7 +49,7 @@ export const activityLabelFor = (state: MascotState, parts: readonly MessagePart
   if (presentation.kind === "computer") return "Usando o computador"
   if (presentation.kind === "files") {
     const path = presentation.filePaths[0]
-    const name = path?.split("/").filter(Boolean).at(-1)
+    const name = path ? pathLeaf(path) : undefined
     const read = tool.type === "tool_call" && toolLeaf(tool.tool).toLowerCase() === "read"
     return name ? `${read ? "Lendo" : "Alterando"} ${name}` : read ? "Lendo arquivo" : "Alterando arquivos"
   }

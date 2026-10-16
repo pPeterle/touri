@@ -30,6 +30,7 @@ import { ComputerUseSettings } from "../features/computer"
 import { DoctorChecks } from "../features/doctor/DoctorChecks"
 import { ReportProblem } from "../features/reports/ReportProblem"
 import { plural, statusLabel, t } from "../i18n"
+import { hostComputerSupported } from "../platform"
 import type { WorkspaceActions } from "../useWorkspace"
 import { type AvatarChoice, AvatarPicker } from "./AvatarPicker"
 import { BotAvatar } from "./BotAvatar"
@@ -777,8 +778,10 @@ export const BotCreateModal = ({
                       <dd>{machine.vmProviderLogin ? "Usar login do provedor" : "Não compartilhar login"}</dd>
                     </div>
                     <div>
-                      <dt>Controle do Mac</dt>
-                      <dd>{machine.hostComputerUse ? "Permitido com autorização temporária" : "Desativado"}</dd>
+                      {hostComputerSupported && <dt>Controle do Mac</dt>}
+                      {hostComputerSupported && (
+                        <dd>{machine.hostComputerUse ? "Permitido com autorização temporária" : "Desativado"}</dd>
+                      )}
                     </div>
                   </>
                 )}
@@ -1274,7 +1277,7 @@ type ProcessEntry = { spec: ProcessSpec; run: import("@touri/contracts").Process
 const folderKey = (value: string): string =>
   `/${value
     .trim()
-    .split("/")
+    .split(/[\\/]/)
     .filter((segment) => segment && segment !== ".")
     .join("/")}`
 
@@ -2080,7 +2083,7 @@ export const SettingsModal = ({
               </code>
             </div>
           </div>
-          <ComputerUseSettings className="settings-computer-permissions" />
+          {hostComputerSupported && <ComputerUseSettings className="settings-computer-permissions" />}
         </SettingsPane>
         <SettingsPane {...pane("notifications")}>
           <SettingsGroup>

@@ -4,7 +4,7 @@ mod credential_store;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
-mod macos;
+pub(crate) mod macos;
 pub mod transport;
 #[cfg(target_os = "windows")]
 mod windows;
