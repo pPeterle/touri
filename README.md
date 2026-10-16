@@ -28,6 +28,13 @@ Built with Tauri v2 (Rust shell), a Bun sidecar and a React UI.
 - Desktop credentials use macOS Keychain or Linux Secret Service, never the database, logs or exports.
 - Optional cloud hosting is a separate, opt-in protocol (`docs/protocol/cloud-v1.md`).
 
+## Platforms
+
+- macOS (Apple Silicon): supported, macOS 14 or newer.
+- Linux (x86_64/arm64): supported. Packages and desktop onboarding have been tested on x86_64;
+  the arm64 sidecar is cross-built, with native arm64 packaging/runtime validation still pending.
+- Windows: port in progress; see the [platform runbook](docs/runbooks/platforms.md).
+
 ## Install (GitHub Releases)
 
 Download the latest `.dmg` from the Releases page and drag `touri.app` to `/Applications`.
@@ -44,6 +51,37 @@ Or remove the quarantine flag from a terminal:
 ```sh
 xattr -dr com.apple.quarantine /Applications/touri.app
 ```
+
+### Linux install
+
+Use an AppImage or Debian package for your architecture. With the AppImage:
+
+```sh
+chmod +x touri_*.AppImage
+./touri_*.AppImage
+```
+
+On Debian/Ubuntu:
+
+```sh
+sudo apt install ./touri_*.deb
+```
+
+Linux needs WebKitGTK 4.1, SQLite, xdg-utils, and a session D-Bus with libsecret and an
+unlocked Secret Service keyring, such as GNOME Keyring or KWallet with its Secret Service
+interface enabled. Credentials use that service; a missing or locked keyring is reported
+by doctor and never causes plaintext credential storage. AppImages also need FUSE, or
+`APPIMAGE_EXTRACT_AND_RUN=1` on hosts without FUSE.
+
+Desktop data lives in `$XDG_DATA_HOME/touri` (default `~/.local/share/touri`).
+The standalone headless server retains `~/.touri`; `TOURI_APP_DATA` overrides either location.
+Podman or Docker is optional for VM bots. If no working container engine is available,
+local bots remain available and the machine feature reports why it cannot start.
+
+Host computer use is hidden on Linux. Local browser automation needs an installed
+Chromium/Chrome or `TOURI_CHROME_BIN`. Interactive provider onboarding currently uses
+credential import. Linux OCI lifecycle/isolation contracts are tested, but live container
+onboarding could not be verified on the build host because it denies user namespaces.
 
 ## Requirements
 
@@ -66,6 +104,24 @@ open src-tauri/target/release/bundle/macos/touri.app
 
 Signing, notarization and the updater are wired but disabled (`docs/DECISIONS.md`).
 For development: `bun run build:sidecar && TOURI_SIDECAR_BIN="$PWD/src-tauri/binaries/touri-sidecar-aarch64-apple-darwin" bun run tauri dev`.
+
+### Build from source on Linux
+
+Install Bun 1.4.3+ and Rust 1.90+. On Debian/Ubuntu, install the system dependencies:
+
+```sh
+sudo apt install build-essential pkg-config libssl-dev libgtk-3-dev \
+  libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
+  libdbus-1-dev libsecret-1-0 gnome-keyring libsqlite3-0 patchelf xdg-utils unzip
+bun install --frozen-lockfile
+bun run build:sidecar:linux
+bun run tauri build --bundles appimage,deb
+```
+
+Bundles are written to `src-tauri/target/release/bundle/{appimage,deb}`.
+On an arm64 Linux host, use `bun run build:sidecar:linux:arm64` before the same Tauri build.
+GTK/WebKit development libraries must match the shell's architecture. Full platform
+requirements, container setup and account-free checks are in the [runbook](docs/runbooks/platforms.md).
 
 ## Verify
 
