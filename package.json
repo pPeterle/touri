@@ -10,6 +10,8 @@
   "scripts": {
     "typecheck": "bunx tsc --noEmit -p tsconfig.base.json",
     "test": "bun test sidecar/test",
+    "test:sidecar:portable": "bun scripts/test-sidecar-portable.ts",
+    "test:sidecar:smoke": "bun scripts/smoke-sidecar.ts",
     "lint": "bunx biome check .",
     "icons:generate": "bun scripts/gen-icons.ts",
     "build:sidecar": "bun scripts/build-sidecar.ts",
