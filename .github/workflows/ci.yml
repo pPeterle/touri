@@ -48,6 +48,7 @@ jobs:
       - run: cargo check
       - run: cargo clippy -- -D warnings
       - run: cargo test
+      - run: cargo install cargo-deny --version 0.20.2 --locked
       - run: cargo deny check
 
   ui:
