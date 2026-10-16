@@ -900,9 +900,10 @@ mod tests {
     }
     use super::{
         is_internal_auth_environment, next_backoff, parse_handshake, HandshakeRetryPolicy,
-        SidecarLaunch, SidecarSupervisor, SpawnFailure, MAX_IDENTICAL_HANDSHAKE_FAILURES,
-        SIDECAR_SCHEMA_VERSION,
+        SpawnFailure, MAX_IDENTICAL_HANDSHAKE_FAILURES, SIDECAR_SCHEMA_VERSION,
     };
+    #[cfg(unix)]
+    use super::{SidecarLaunch, SidecarSupervisor};
     use std::time::Duration;
 
     #[test]

@@ -4,7 +4,9 @@ use std::time::Duration;
 use touri_lib::host_bridge::{HostBridge, HostBridgeCallbacks, AUTH_REQUIRED_CODE};
 use touri_lib::keychain::KeychainStore;
 use touri_lib::preview::{allows_preview_url, parse_preview_url};
-use touri_lib::sidecar::{next_backoff, parse_handshake, SidecarLaunch, SidecarSupervisor};
+use touri_lib::sidecar::{next_backoff, parse_handshake};
+#[cfg(unix)]
+use touri_lib::sidecar::{SidecarLaunch, SidecarSupervisor};
 use touri_lib::window_config::{parse_position, parse_size, WindowPlacement, DEFAULT_WINDOW_SIZE};
 
 #[test]
