@@ -1,13 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod download_guard;
 pub mod file_grants;
+mod file_save;
 pub mod host_bridge;
 mod i18n;
 pub mod keychain;
+pub mod platform;
 pub mod power;
 pub mod preview;
-mod download_guard;
-mod file_save;
 mod reports;
 pub mod secret_card;
 pub mod sidecar;
@@ -18,7 +19,6 @@ pub mod computer;
 pub mod deep_link;
 mod tray;
 
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -178,20 +178,7 @@ fn computer_kill_switch(
 
 #[tauri::command]
 fn permissions_open_settings(permission: String) -> Result<(), String> {
-    let url = match permission.as_str() {
-        "accessibility" => {
-            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
-        }
-        "screen-recording" => {
-            "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
-        }
-        _ => return Err("unknown permission".to_string()),
-    };
-    Command::new("open")
-        .arg(url)
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| format!("open permission settings failed: {error}"))
+    platform::permission_settings(&permission)
 }
 
 #[tauri::command]
@@ -217,12 +204,7 @@ fn pick_folder(app: AppHandle<Wry>, title: String) -> Option<String> {
 
 #[tauri::command]
 fn reveal_in_finder(path: String) -> Result<(), String> {
-    Command::new("open")
-        .arg("-R")
-        .arg(path)
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| format!("reveal in Finder failed: {error}"))
+    platform::reveal(&path)
 }
 
 #[tauri::command]
@@ -409,7 +391,8 @@ pub fn run() {
             app.set_menu(menu)?;
             #[cfg(target_os = "macos")]
             window_config::observe_display_changes(app.handle());
-            let launch = SidecarLaunch::from_app(app.handle()).map_err(std::io::Error::other)?;
+            let mut launch =
+                SidecarLaunch::from_app(app.handle()).map_err(std::io::Error::other)?;
             let keychain = app.state::<AppState>().keychain.clone();
             let file_grants = Arc::clone(&app.state::<AppState>().file_grants);
             let card_manager = app.state::<SecretCardManager>().inner().clone();
@@ -450,25 +433,28 @@ pub fn run() {
                 callbacks,
             )
             .map_err(std::io::Error::other)?;
+            launch.host_socket = bridge.endpoint();
             let supervisor = SidecarSupervisor::start(app.handle().clone(), launch)
                 .map_err(std::io::Error::other)?;
             computer::install(app.handle());
             let hotkey_bridge = bridge.clone_for_tray();
-            app.global_shortcut()
-                .on_shortcut(
-                    "Control+Alt+Command+Period",
-                    move |app, _shortcut, event| {
-                        if event.state == ShortcutState::Pressed {
-                            computer::kill();
-                            let _ = app.emit("computer-kill-switch", ());
-                            let _ = hotkey_bridge.send_notification(
-                                "computer.killSwitch",
-                                json!({ "at": now_ms() }),
-                            );
-                        }
-                    },
-                )
-                .map_err(std::io::Error::other)?;
+            if platform::HOST_COMPUTER {
+                app.global_shortcut()
+                    .on_shortcut(
+                        "Control+Alt+Command+Period",
+                        move |app, _shortcut, event| {
+                            if event.state == ShortcutState::Pressed {
+                                computer::kill();
+                                let _ = app.emit("computer-kill-switch", ());
+                                let _ = hotkey_bridge.send_notification(
+                                    "computer.killSwitch",
+                                    json!({ "at": now_ms() }),
+                                );
+                            }
+                        },
+                    )
+                    .map_err(std::io::Error::other)?;
+            }
             let power_monitor = power::PowerMonitor::start(bridge.clone_for_tray());
             let endpoint = supervisor.endpoint();
             let state = app.state::<AppState>();
@@ -569,6 +555,7 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { .. } => window_config::show_main(app, None),
             tauri::RunEvent::ExitRequested { .. } => stop_runtime(app),
+            #[cfg(target_os = "macos")]
             tauri::RunEvent::Opened { urls } => {
                 for url in urls {
                     deep_link::handle_url(app, url.as_str());

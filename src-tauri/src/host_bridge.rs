@@ -1,8 +1,6 @@
+use crate::platform::transport::{self, Listener as UnixListener, Stream as UnixStream};
 use std::collections::HashMap;
-use std::fs::{create_dir_all, remove_file, set_permissions, Permissions};
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -96,20 +94,7 @@ impl HostBridge {
         keychain: KeychainStore,
         callbacks: HostBridgeCallbacks,
     ) -> Result<Self, String> {
-        if let Some(parent) = socket_path.parent() {
-            create_dir_all(parent)
-                .map_err(|error| format!("create host socket directory failed: {error}"))?;
-            set_permissions(parent, Permissions::from_mode(0o700))
-                .map_err(|error| format!("secure host socket directory failed: {error}"))?;
-        }
-        if socket_path.exists() {
-            remove_file(&socket_path)
-                .map_err(|error| format!("remove stale host socket failed: {error}"))?;
-        }
-        let listener = UnixListener::bind(&socket_path)
-            .map_err(|error| format!("bind host socket failed: {error}"))?;
-        set_permissions(&socket_path, Permissions::from_mode(0o600))
-            .map_err(|error| format!("secure host socket failed: {error}"))?;
+        let (listener, socket_path) = transport::listen(&socket_path)?;
         listener
             .set_nonblocking(true)
             .map_err(|error| format!("configure host socket failed: {error}"))?;
@@ -133,6 +118,10 @@ impl HostBridge {
             sender,
             join: Some(join),
         })
+    }
+
+    pub fn endpoint(&self) -> PathBuf {
+        self.socket_path.clone()
     }
 
     pub fn send_notification(&self, method: &str, params: Value) -> Result<(), String> {
@@ -179,12 +168,12 @@ impl HostBridgeSender {
 impl HostBridge {
     pub fn shutdown(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        let _ = UnixStream::connect(&self.socket_path);
+        transport::wake(&self.socket_path);
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
         if self.socket_path.exists() {
-            let _ = remove_file(&self.socket_path);
+            transport::cleanup(&self.socket_path);
         }
     }
 }
@@ -498,7 +487,7 @@ pub fn host_notification(method: &str, params: Value) -> Value {
     json!({ "jsonrpc": "2.0", "method": method, "params": params })
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::{HostBridge, HostBridgeCallbacks, AUTH_REQUIRED_CODE};
     use crate::keychain::KeychainStore;

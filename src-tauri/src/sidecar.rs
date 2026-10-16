@@ -293,7 +293,10 @@ impl<R: Runtime> SidecarSupervisor<R> {
         self.stop.store(true, Ordering::SeqCst);
         if let Ok(mut state) = self.state.lock() {
             if let Some(child) = state.child.as_mut() {
+                #[cfg(unix)]
                 let _ = unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+                #[cfg(windows)]
+                let _ = child.kill();
             }
         }
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -572,7 +575,10 @@ fn append_shell_log_line(logs_dir: &Path, line: &str) {
 fn credential_label(label: &str) -> bool {
     let lower = label.to_ascii_lowercase();
     if lower.rsplit(['-', '_']).next().is_some_and(|suffix| {
-        matches!(suffix, "token" | "secret" | "password" | "passwd" | "credential")
+        matches!(
+            suffix,
+            "token" | "secret" | "password" | "passwd" | "credential"
+        )
     }) {
         return true;
     }
@@ -611,8 +617,7 @@ fn sanitize_sidecar_diagnostic(line: &str) -> String {
     }
     if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(line) {
         sanitize_value(&mut value);
-        return serde_json::to_string(&value)
-            .unwrap_or_else(|_| "Diagnóstico indisponível".into());
+        return serde_json::to_string(&value).unwrap_or_else(|_| "Diagnóstico indisponível".into());
     }
     sanitize_diagnostic_text(line)
 }
@@ -679,7 +684,9 @@ fn sanitize_diagnostic_text(text: &str) -> String {
             || label.starts_with("eyJ")
         {
             let length = rest
-                .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ',' | ';' | '}' | ']'))
+                .find(|c: char| {
+                    c.is_whitespace() || matches!(c, '"' | '\'' | ',' | ';' | '}' | ']')
+                })
                 .unwrap_or(rest.len());
             output.push_str("[REDACTED]");
             rest = &rest[length..];
@@ -807,7 +814,15 @@ fn sidecar_binary<R: Runtime>(app: &AppHandle<R>) -> PathBuf {
     }
     if let Some(sibling) = std::env::current_exe()
         .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join("touri-sidecar")))
+        .and_then(|exe| {
+            exe.parent().map(|dir| {
+                dir.join(if cfg!(windows) {
+                    "touri-sidecar.exe"
+                } else {
+                    "touri-sidecar"
+                })
+            })
+        })
         .filter(|path| path.exists())
     {
         return sibling;
@@ -839,6 +854,7 @@ fn is_existing_executable(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     #[test]
     fn r13_app_data_run_and_logs_are_owner_only_even_under_a_loose_umask() {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -866,7 +882,8 @@ mod tests {
 
     #[test]
     fn stderr_ingestion_masks_credential_labels() {
-        let dir = std::env::temp_dir().join(format!("touri-stderr-redaction-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("touri-stderr-redaction-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("stderr.log");
         let input = concat!(
@@ -925,7 +942,8 @@ mod tests {
             "type": "touri-sidecar-ready", "port": 43123, "pid": 99,
             "version": "0.1.0", "schemaVersion": SIDECAR_SCHEMA_VERSION
         });
-        let schema_mismatch_reason = format!("schema mismatch: shell expects {SIDECAR_SCHEMA_VERSION}, sidecar reported 5");
+        let schema_mismatch_reason =
+            format!("schema mismatch: shell expects {SIDECAR_SCHEMA_VERSION}, sidecar reported 5");
         let cases = [
             ("schemaVersion", serde_json::json!(5), schema_mismatch_reason.as_str()),
             ("type", serde_json::json!("wrong"), "invalid sidecar handshake type: expected touri-sidecar-ready, sidecar reported \"wrong\""),
@@ -1006,6 +1024,7 @@ mod tests {
         assert_eq!(policy.consecutive, 1);
     }
 
+    #[cfg(unix)]
     #[test]
     fn supervisor_preserves_the_failure_and_manual_restart_resumes_after_the_limit() {
         use std::os::unix::fs::PermissionsExt;
@@ -1050,7 +1069,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(supervisor.state.lock().unwrap().retry_stopped);
-        let reason = format!("schema mismatch: shell expects {SIDECAR_SCHEMA_VERSION}, sidecar reported 5");
+        let reason =
+            format!("schema mismatch: shell expects {SIDECAR_SCHEMA_VERSION}, sidecar reported 5");
         assert_eq!(supervisor.connection_info().unwrap_err(), reason);
         std::thread::sleep(Duration::from_millis(1100));
         let logs = std::fs::read_to_string(log).unwrap();
