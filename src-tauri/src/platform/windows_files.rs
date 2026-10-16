@@ -157,7 +157,13 @@ fn pin_dir(path: &Path, private: bool) -> io::Result<File> {
     let file = OpenOptions::new()
         // SetSecurityInfo reads the existing protection/inheritance state while
         // replacing a directory DACL; WRITE_DAC alone is insufficient.
-        .access_mode(FILE_READ_ATTRIBUTES | if private { READ_CONTROL | WRITE_DAC } else { 0 })
+        // Metadata-only handles bypass sharing checks. Directory-list access
+        // makes omission of FILE_SHARE_DELETE actually prevent rename/delete.
+        .access_mode(
+            FILE_LIST_DIRECTORY
+                | FILE_READ_ATTRIBUTES
+                | if private { READ_CONTROL | WRITE_DAC } else { 0 },
+        )
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)?;
