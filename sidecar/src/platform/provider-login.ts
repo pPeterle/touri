@@ -46,7 +46,7 @@ export const spawnProviderLoginPty = ({
   platform?: string
   spawn?: Kernel["spawnTree"]
 }): ReturnType<Kernel["spawnTree"]> => {
-  const pty = providerLoginPty(platform, command, args, env.TOURI_DESKTOP_HELPER)
+  const pty = providerLoginPty(platform, command, args, env.TOURI_DESKTOP_HELPER ?? "")
   return pty.supported
     ? spawn({ cmd: pty.command, args: pty.args, cwd, env: buildChildEnv({ base: env, overrides: pty.env ?? {} }) })
     : { success: false, errorCode: "SPAWN_FAILED", error: pty.message }

@@ -31,10 +31,17 @@ test("login sessions use the PTY spawn interface and strip desktop capabilities"
     env: { TOURI_DESKTOP_HELPER: helper, PATH: "fixture-path" },
   })
   received = undefined
-  expect(
-    spawnProviderLoginPty({ command: "provider.exe", args: [], cwd: "C:\\fixture", platform: "win32", spawn, env: {} }),
-  ).toMatchObject({ success: false, errorCode: "SPAWN_FAILED" })
-  expect(received).toBeUndefined()
+  const previous = process.env.TOURI_DESKTOP_HELPER
+  process.env.TOURI_DESKTOP_HELPER = helper
+  try {
+    expect(
+      spawnProviderLoginPty({ command: "provider.exe", args: [], cwd: "C:\\fixture", platform: "win32", spawn, env: {} }),
+    ).toMatchObject({ success: false, errorCode: "SPAWN_FAILED" })
+    expect(received).toBeUndefined()
+  } finally {
+    if (previous === undefined) delete process.env.TOURI_DESKTOP_HELPER
+    else process.env.TOURI_DESKTOP_HELPER = previous
+  }
 })
 
 test("PTY adapters preserve provider arguments and require the installed Windows helper", async () => {
