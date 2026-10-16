@@ -245,7 +245,20 @@ test("crash restart policy stops after five failures and orphan cleanup restarts
         "SELECT count(*) AS count FROM process_runs WHERE process_id = (SELECT id FROM processes WHERE name = 'autoweb')",
       )
       .get() as { count: number }
+    const previous = database
+      .query(
+        "SELECT pid FROM process_runs WHERE process_id = (SELECT id FROM processes WHERE name = 'autoweb') AND status IN ('running','ready')",
+      )
+      .get() as { pid: number }
     await init(harness.runtime.kernel)
+    await waitFor(() => {
+      try {
+        process.kill(previous.pid, 0)
+        return false
+      } catch {
+        return true
+      }
+    })
     await waitFor(() => {
       const row = database
         .query(

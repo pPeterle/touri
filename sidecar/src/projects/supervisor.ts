@@ -1055,7 +1055,7 @@ export const createSupervisor = ({
 
   const stopGroup = async ({ pgid, cwd }: { pgid: number; cwd: string }): Promise<void> => {
     if (pgid <= 0) return
-    await runCommand({ kernel, cmd: "kill", args: ["-TERM", `-${pgid}`], cwd })
+    await runCommand({ kernel, cmd: "kill", args: ["-TERM", "--", `-${pgid}`], cwd })
     await wait(100)
     let groupAlive = false
     try {
@@ -1064,7 +1064,7 @@ export const createSupervisor = ({
     } catch {
       groupAlive = false
     }
-    if (groupAlive) await runCommand({ kernel, cmd: "kill", args: ["-KILL", `-${pgid}`], cwd })
+    if (groupAlive) await runCommand({ kernel, cmd: "kill", args: ["-KILL", "--", `-${pgid}`], cwd })
   }
 
   const cleanupOrphans = async (): Promise<void> => {
