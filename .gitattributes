@@ -1,3 +1,4 @@
+* text=auto eol=lf
 sidecar/src/vm/image/* text eol=lf
 *.ts text eol=lf
 *.tsx text eol=lf

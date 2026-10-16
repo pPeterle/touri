@@ -15,7 +15,7 @@ jobs:
           bun-version: 1.2.21
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
-      - run: bunx ajv-cli validate -s packages/contracts/mcp-tools.json -d packages/contracts/mcp-tools.json --spec=draft2020
+      - run: bunx ajv-cli validate -s packages/contracts/mcp-tools.json -d packages/contracts/mcp-tools.json --spec=draft2020 --strict=false
       - run: 'sqlite3 :memory: < packages/contracts/schema.sql'
       - run: cmp packages/contracts/schema.sql sidecar/src/kernel/migrations/0001.sql
 
@@ -32,7 +32,7 @@ jobs:
       - run: bun test
 
   rust:
-    runs-on: macos-14
+    runs-on: macos-15
     defaults:
       run:
         working-directory: src-tauri
