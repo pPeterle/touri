@@ -487,12 +487,12 @@ pub fn host_notification(method: &str, params: Value) -> Value {
     json!({ "jsonrpc": "2.0", "method": method, "params": params })
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::{HostBridge, HostBridgeCallbacks, AUTH_REQUIRED_CODE};
     use crate::keychain::KeychainStore;
+    use crate::platform::transport;
     use std::io::{BufRead, BufReader, Write};
-    use std::os::unix::net::UnixStream;
     use std::sync::{mpsc, Arc, Mutex};
     use std::time::Duration;
 
@@ -512,7 +512,7 @@ mod tests {
             callbacks,
         )
         .expect("start host bridge");
-        let mut connection = UnixStream::connect(&socket).expect("connect host bridge");
+        let mut connection = transport::connect(&bridge.endpoint()).expect("connect host bridge");
         connection
             .set_read_timeout(Some(Duration::from_secs(2)))
             .expect("set test timeout");
@@ -547,7 +547,7 @@ mod tests {
             }),
             notify: Arc::new(|_, _, _, _| Ok(())),
         };
-        let (host, mut connection) = UnixStream::pair().expect("create host connection");
+        let (host, mut connection) = transport::stream_pair().expect("create host connection");
         host.set_read_timeout(Some(Duration::from_millis(20)))
             .expect("set host read timeout");
         let writer = Arc::new(Mutex::new(host.try_clone().expect("clone host writer")));

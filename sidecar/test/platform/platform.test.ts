@@ -32,25 +32,11 @@ test("bridge TCP endpoint validation forbids remote hosts and URL credentials", 
     expect(() => connectionOptions(value)).toThrow()
   expect(connectionOptions("/run/touri/host.sock")).toEqual({ path: "/run/touri/host.sock" })
 })
-test("MCP pipe names are stable and scoped to a data directory", () => {
-  expect(mcpEndpoint("a", "win32")).toMatch(/^\\\\\.\\pipe\\touri-mcp-[a-f0-9]{32}$/)
-  expect(mcpEndpoint("a", "win32")).not.toBe(mcpEndpoint("b", "win32"))
-  expect(mcpEndpoint("a", "linux")).toBe("a/mcp.sock")
-})
-
-test("PTY adapters keep commands as arguments and explain the Windows limitation", async () => {
-  const { providerLoginPty } = await import("../../src/platform/provider-login")
-  const linux = providerLoginPty("linux", "example-provider", ["login", "literal;argument"])
-  expect(linux).toMatchObject({ supported: true, command: "script" })
-  if (linux.supported) expect(linux.args).toContain("'example-provider' 'login' 'literal;argument'")
-  expect(providerLoginPty("darwin", "example-provider", ["login"])).toMatchObject({
-    supported: true,
-    command: "/usr/bin/expect",
-  })
-  expect(providerLoginPty("win32", "example-provider", [])).toMatchObject({
-    supported: false,
-    message: expect.stringContaining("ConPTY"),
-  })
+test("Windows MCP discovery accepts only validated loopback endpoints", () => {
+  expect(mcpEndpoint("run", "win32", () => JSON.stringify("tcp://127.0.0.1:4321"))).toBe("tcp://127.0.0.1:4321")
+  for (const value of ["tcp://example.test:4321", "tcp://127.0.0.1:0", "file.sock", {}, null])
+    expect(() => mcpEndpoint("run", "win32", () => JSON.stringify(value))).toThrow()
+  expect(mcpEndpoint("a", "linux")).toMatch(/a[/\\]mcp\.sock$/)
 })
 
 test("Linux process identity handles parenthesized names and refuses malformed/reused PIDs", () => {

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto"
+import { readFileSync } from "node:fs"
 import { join } from "node:path"
 /** Internal endpoints never accept a remote TCP host. Token auth still runs above the transport. */
 export const connectionOptions = (endpoint: string): { path: string } | { host: "127.0.0.1"; port: number } => {
@@ -19,7 +19,15 @@ export const connectionOptions = (endpoint: string): { path: string } | { host: 
     throw new Error("Invalid loopback bridge endpoint")
   return { host: "127.0.0.1", port }
 }
-export const mcpEndpoint = (runDir: string, platform = process.platform) =>
-  platform === "win32"
-    ? `\\\\.\\pipe\\touri-mcp-${createHash("sha256").update(runDir).digest("hex").slice(0, 32)}`
-    : join(runDir, "mcp.sock")
+export const mcpEndpointFile = (runDir: string) => join(runDir, "mcp-endpoint.json")
+export const mcpEndpoint = (
+  runDir: string,
+  platform = process.platform,
+  read: (path: string) => string = (path) => readFileSync(path, "utf8"),
+): string => {
+  if (platform !== "win32") return join(runDir, "mcp.sock")
+  const value: unknown = JSON.parse(read(mcpEndpointFile(runDir)))
+  if (typeof value !== "string" || !value.startsWith("tcp:") || !("port" in connectionOptions(value)))
+    throw new Error("Invalid MCP loopback endpoint")
+  return value
+}
