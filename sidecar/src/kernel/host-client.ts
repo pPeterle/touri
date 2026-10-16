@@ -1,5 +1,6 @@
 import { createConnection, type Socket } from "node:net"
 import type { HostMethods, HostNotification, Kernel } from "@touri/contracts"
+import { connectionOptions } from "../platform/transport"
 
 type RpcResponse = { id?: number; result?: unknown; error?: { message?: string } }
 type Pending = { resolve: (response: RpcResponse) => void; reject: (error: Error) => void }
@@ -75,7 +76,7 @@ export const createHostClient = ({
     if (socket) return socket
     if (connecting) return connecting
     connecting = new Promise<Socket>((resolve, reject) => {
-      const candidate = createConnection(socketPath)
+      const candidate = createConnection(connectionOptions(socketPath))
       const fail = (error: Error): void => {
         candidate.destroy()
         failConnection(error)

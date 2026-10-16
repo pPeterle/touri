@@ -2,10 +2,10 @@ import { dlopen, read } from "bun:ffi"
 import { closeSync, constants, fchmodSync, fstatSync, ftruncateSync, openSync, readSync, writeSync } from "node:fs"
 import { join } from "node:path"
 import type { AppPaths } from "@touri/contracts"
+import { closeOnExec, errnoSymbol, libcLibrary, wouldBlock } from "../platform/posix"
 import { ensurePrivateDirectory } from "./files"
 
-const errnoSymbol = process.platform === "darwin" ? "__error" : "__errno_location"
-const native = dlopen(process.platform === "darwin" ? "/usr/lib/libSystem.B.dylib" : "libc.so.6", {
+const native = dlopen(libcLibrary, {
   flock: { args: ["i32", "i32"], returns: "i32" },
   getppid: { args: [], returns: "i32" },
   [errnoSymbol]: { args: [], returns: "ptr" },
@@ -49,7 +49,6 @@ export const acquireRuntimeLock = async (
   }: { timeoutMs?: number; parentPid?: number | null } = {},
 ): Promise<{ release: () => void }> => {
   ensurePrivateDirectory({ root: paths.appData, path: paths.runDir })
-  const closeOnExec = process.platform === "darwin" ? 0x1000000 : 0x80000
   const fd = openSync(
     join(paths.runDir, "runtime.lock"),
     constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW | closeOnExec,
@@ -63,7 +62,7 @@ export const acquireRuntimeLock = async (
     while (native.flock(fd, 2 | 4) !== 0) {
       const pointer = native[errnoSymbol]?.()
       const errno = pointer ? read.i32(pointer) : 0
-      if (errno !== (process.platform === "darwin" ? 35 : 11)) throw new Error(`Falha no lock do runtime (${errno})`)
+      if (errno !== wouldBlock) throw new Error(`Falha no lock do runtime (${errno})`)
       let owner: Owner | null = null
       try {
         const bytes = Buffer.alloc(4096)

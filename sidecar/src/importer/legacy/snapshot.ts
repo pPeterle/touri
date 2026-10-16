@@ -1,8 +1,9 @@
 import { CString, dlopen, JSCallback, type Pointer } from "bun:ffi"
+import { sqliteLibrary } from "../../platform/posix"
 import { lstatSync } from "./fs"
 
 export const MAX_SNAPSHOT_BYTES = 128 * 1024 * 1024
-const sqlite = dlopen(process.platform === "darwin" ? "/usr/lib/libsqlite3.dylib" : "libsqlite3.so.0", {
+const sqlite = dlopen(sqliteLibrary, {
   sqlite3_open_v2: { args: ["cstring", "ptr", "i32", "ptr"], returns: "i32" },
   sqlite3_close_v2: { args: ["ptr"], returns: "i32" },
   sqlite3_set_authorizer: { args: ["ptr", "ptr", "ptr"], returns: "i32" },

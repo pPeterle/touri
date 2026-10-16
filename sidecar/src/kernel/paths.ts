@@ -1,9 +1,9 @@
-import { homedir, platform } from "node:os"
 import { join } from "node:path"
 import type { AppPaths } from "@touri/contracts"
 
-const defaultRoot = (): string =>
-  platform() === "darwin" ? join(homedir(), "Library", "Application Support", "touri") : join(homedir(), ".touri")
+import { hostPlatform } from "../platform"
+
+const defaultRoot = hostPlatform.defaultDataRoot
 
 export const createAppPaths = ({ appData }: { appData?: string } = {}): AppPaths => {
   const root = appData ?? process.env.TOURI_APP_DATA ?? defaultRoot()

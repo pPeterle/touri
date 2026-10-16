@@ -79,7 +79,7 @@ const notConnectedMessage = (target: LoginTarget): string =>
   `${target.label} ainda não está conectado neste bot. Abra Permissões do bot > Computador > Login do provedor e escolha o arquivo de login do host ou salve um login no cofre (${target.command}).`
 
 const vaultTransportMessage = (target: LoginTarget): string =>
-  `O cofre de segredos não respondeu. Autorize o acesso ao cofre do macOS ou salve um login com ${target.command} nas permissões do bot.`
+  `O cofre de segredos não respondeu. Autorize o acesso ao cofre do sistema ou salve um login com ${target.command} nas permissões do bot.`
 
 export const readVault = async (
   kernel: Kernel,

@@ -17,6 +17,7 @@ import { atomicWriteFile, ensurePrivateDirectory, removePrivateFile } from "../k
 import { isIdle } from "../kernel/policy"
 import { safeThreadId } from "../mcp/auth"
 import { createRunMcpToken } from "../mcp/run-token"
+import { mcpEndpoint } from "../platform/transport"
 import { copyProjectSnapshot } from "../projects/vm-snapshot"
 import { applyProviderPrivacy, cliTelemetryOff } from "../runtime/privacy"
 import { connectMcpBridge } from "./bridge"
@@ -937,7 +938,7 @@ export const createVmRuntime = ({
                 port: port.hostPort,
                 transport: port.url,
                 token: session.token,
-                socketPath: join(kernel.paths.runDir, "mcp.sock"),
+                socketPath: mcpEndpoint(kernel.paths.runDir),
               }),
             )
           }

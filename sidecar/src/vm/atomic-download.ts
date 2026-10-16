@@ -3,16 +3,17 @@ import { randomBytes } from "node:crypto"
 import { closeSync, constants, fchmodSync, fstatSync, fsyncSync, writeSync } from "node:fs"
 import { basename, dirname, resolve } from "node:path"
 import { openWorkspaceDirectory } from "../kernel/files"
+import { canonicalSystemPath, errnoSymbol, libcLibrary } from "../platform/posix"
 
-const native = dlopen(process.platform === "darwin" ? "/usr/lib/libSystem.B.dylib" : "libc.so.6", {
+const native = dlopen(libcLibrary, {
   openat: { args: ["i32", "cstring", "i32", "u32"], returns: "i32" },
-  [process.platform === "darwin" ? "__error" : "__errno_location"]: { args: [], returns: "ptr" },
+  [errnoSymbol]: { args: [], returns: "ptr" },
   linkat: { args: ["i32", "cstring", "i32", "cstring", "i32"], returns: "i32" },
   renameat: { args: ["i32", "cstring", "i32", "cstring"], returns: "i32" },
   unlinkat: { args: ["i32", "cstring", "i32"], returns: "i32" },
 }).symbols
 const errno = () => {
-  const pointer = native[process.platform === "darwin" ? "__error" : "__errno_location"]?.()
+  const pointer = native[errnoSymbol]?.()
   return pointer ? read.i32(pointer) : 0
 }
 const c = (value: string) => Buffer.from(`${value}\0`)
@@ -24,11 +25,7 @@ export const atomicDownload = async (
   { sync = fsyncSync }: { sync?: typeof fsyncSync } = {},
 ) => {
   if (!response.ok || !response.body || path.includes("\0")) throw new Error("Snapshot inválido")
-  let target = resolve(path)
-  // macOS system aliases are fixed by the OS; user-controlled ancestors still
-  // traverse O_NOFOLLOW, including under these canonical system directories.
-  if (process.platform === "darwin")
-    for (const alias of ["/var/", "/tmp/", "/etc/"]) if (target.startsWith(alias)) target = `/private${target}`
+  const target = canonicalSystemPath(resolve(path))
   const directory = openWorkspaceDirectory({ root: "/", path: dirname(target).slice(1) })
   const name = basename(target)
   const temporary = `.touri-${randomBytes(16).toString("hex")}.download`

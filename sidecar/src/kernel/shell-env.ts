@@ -1,6 +1,7 @@
 import { existsSync, readdirSync } from "node:fs"
 import { homedir } from "node:os"
 import type { Kernel } from "@touri/contracts"
+import { defaultShell, extraToolDirectories } from "../platform/posix"
 import { withDeadline } from "./policy"
 import { discardStream } from "./streams"
 
@@ -57,8 +58,7 @@ const toolDirectories = ({ home, exists }: { home: string; exists: (path: string
     `${home}/.asdf/shims`,
     `${home}/.cargo/bin`,
     ...nvmBins,
-    "/opt/homebrew/bin",
-    "/opt/homebrew/sbin",
+    ...extraToolDirectories,
     "/usr/local/bin",
     "/usr/bin",
     "/bin",
@@ -94,7 +94,7 @@ export const createShellEnv = ({ spawn, shell }: { spawn: Kernel["spawnTree"]; s
   const load = async (): Promise<Record<string, string>> => {
     const marker = "__TOURI_ENV__"
     const child = spawn({
-      cmd: shell ?? process.env.SHELL ?? (process.platform === "darwin" ? "/bin/zsh" : "/bin/bash"),
+      cmd: shell ?? process.env.SHELL ?? defaultShell,
       args: ["-ilc", `printf '\\0${marker}\\0'; env -0`],
       cwd: process.cwd(),
       env: buildChildEnv(),

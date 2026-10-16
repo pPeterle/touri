@@ -13,6 +13,8 @@ import type {
   ToolResult,
 } from "@touri/contracts"
 import { approveSecretRelease } from "../approvals/secrets"
+import { hostPlatform } from "../platform"
+import * as macos from "../platform/macos"
 import { type ChromeLauncher, createChromeLauncher, deriveChromeWindowConfig } from "./launcher"
 import { assignLegacyCookies } from "./legacyCookieMigration"
 import { describeNavigationFailure, isChromeErrorPage, isLoadableUrl, networkErrorCode, stripHash } from "./navigation"
@@ -1631,13 +1633,12 @@ export const createBrowserEngine = ({
   }
 
   const focusManagedChrome = async (): Promise<void> => {
-    if (windowConfig.headless || discoverBotId) return
+    if (windowConfig.headless || discoverBotId || hostPlatform !== macos) return
     const env = { ...(await kernel.shellEnv()), ...process.env }
     const cleanEnv: Record<string, string> = {}
     for (const [key, value] of Object.entries(env)) if (value !== undefined) cleanEnv[key] = value
     const front = kernel.spawnTree({
-      cmd: "/usr/bin/osascript",
-      args: ["-e", 'tell application "Google Chrome" to activate'],
+      ...macos.focusChrome,
       cwd: kernel.paths.appData,
       env: cleanEnv,
     })

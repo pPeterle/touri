@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite"
 import type { Bot, DoctorCheck, Kernel } from "@touri/contracts"
+import { hostPlatform } from "../platform"
 import {
   hostLoginFileExists,
   loginTarget,
@@ -44,7 +45,7 @@ const vaultCheck = async (kernel: Kernel, bot: VmBotRow, signal: AbortSignal, la
   } catch (error) {
     signal.throwIfAborted()
     const detail = error instanceof ProviderLoginError ? error.message : "O cofre de segredos não respondeu."
-    return check(id, label, "fail", `${bot.name}: ${detail}`, "open -a 'Keychain Access'")
+    return check(id, label, "fail", `${bot.name}: ${detail}`, hostPlatform.secretStoreFix)
   }
 }
 
@@ -56,8 +57,14 @@ const botCheck = async (kernel: Kernel, bot: VmBotRow, hostHome: string, signal:
     const present = hostLoginFileExists(hostHome, bot.provider)
     const label = `Login · ${bot.name} · arquivo do host`
     return present
-      ? check(id, label, "pass", `${bot.name}: usa o arquivo de login do ${target.label} neste Mac.`)
-      : check(id, label, "fail", `${bot.name}: arquivo de login do ${target.label} ausente neste Mac.`, target.command)
+      ? check(id, label, "pass", `${bot.name}: usa o arquivo de login do ${target.label} neste computador.`)
+      : check(
+          id,
+          label,
+          "fail",
+          `${bot.name}: arquivo de login do ${target.label} ausente neste computador.`,
+          target.command,
+        )
   }
   if (source === "vault") return vaultCheck(kernel, bot, signal, `Login · ${bot.name} · cofre`)
   return check(

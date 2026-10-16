@@ -2,6 +2,7 @@ import { chmodSync, mkdirSync, unlinkSync } from "node:fs"
 import { createServer, type Server, type Socket } from "node:net"
 import { dirname } from "node:path"
 import type { Kernel, ToolRegistration } from "@touri/contracts"
+import { mcpEndpoint } from "../platform/transport"
 import { MCP_LIMITS, serveMcpConnection } from "./connection"
 
 const unlinkIfPresent = (path: string): void => {
@@ -19,7 +20,7 @@ export const createMcpSocket = ({
   kernel: Kernel
   registrations: Map<string, ToolRegistration>
 }) => {
-  const socketPath = `${kernel.paths.runDir}/mcp.sock`
+  const socketPath = mcpEndpoint(kernel.paths.runDir)
   const tokenDir = `${kernel.paths.runDir}/mcp-tokens`
   const connections = new Set<Socket>()
   let server: Server | null = null
@@ -29,7 +30,7 @@ export const createMcpSocket = ({
     mkdirSync(tokenDir, { recursive: true, mode: 0o700 })
     chmodSync(dirname(socketPath), 0o700)
     chmodSync(tokenDir, 0o700)
-    unlinkIfPresent(socketPath)
+    if (process.platform !== "win32") unlinkIfPresent(socketPath)
     const candidate = createServer((socket) => {
       if (connections.size >= MCP_LIMITS.connections) {
         socket.destroy()
@@ -47,7 +48,7 @@ export const createMcpSocket = ({
       }
       const onListening = (): void => {
         candidate.off("error", onError)
-        chmodSync(socketPath, 0o600)
+        if (process.platform !== "win32") chmodSync(socketPath, 0o600)
         resolve()
       }
       candidate.once("error", onError)
@@ -70,7 +71,7 @@ export const createMcpSocket = ({
         }
       })
     }
-    unlinkIfPresent(socketPath)
+    if (process.platform !== "win32") unlinkIfPresent(socketPath)
   }
 
   return { listen, close, socketPath }

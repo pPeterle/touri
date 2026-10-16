@@ -8,20 +8,20 @@ import { collectUnusedOutputBlobs } from "../kernel/data-maintenance"
 import { openWorkspaceDirectory, removePrivateFile } from "../kernel/files"
 import { attachmentReferences } from "../kernel/output-blobs"
 import { botReplayRows, purgeBotReplay } from "../kernel/transcript-storage"
+import { direntNameOffset, errnoSymbol, libcLibrary, removeDirectoryFlag } from "../platform/posix"
 import { providerLoginAccount } from "./provider-login"
 
-const darwin = process.platform === "darwin"
-const native = dlopen(darwin ? "/usr/lib/libSystem.B.dylib" : "libc.so.6", {
+const native = dlopen(libcLibrary, {
   openat: { args: ["i32", "cstring", "i32"], returns: "i32" },
   unlinkat: { args: ["i32", "cstring", "i32"], returns: "i32" },
   dup: { args: ["i32"], returns: "i32" },
   fdopendir: { args: ["i32"], returns: "ptr" },
   readdir: { args: ["ptr"], returns: "ptr" },
   closedir: { args: ["ptr"], returns: "i32" },
-  [darwin ? "__error" : "__errno_location"]: { args: [], returns: "ptr" },
+  [errnoSymbol]: { args: [], returns: "ptr" },
 }).symbols
 const errno = () => {
-  const pointer = native[darwin ? "__error" : "__errno_location"]?.()
+  const pointer = native[errnoSymbol]?.()
   return pointer ? read.i32(pointer) : 0
 }
 const cstring = (value: string) => Buffer.from(`${value}\0`)
@@ -58,7 +58,7 @@ const removeBotHome = (kernel: Kernel, botId: string) => {
         while (true) {
           const entry = native.readdir(stream)
           if (!entry) break
-          const entryName = new CString(entry, darwin ? 21 : 19).toString()
+          const entryName = new CString(entry, direntNameOffset).toString()
           if (entryName !== "." && entryName !== "..") remove(child, entryName)
         }
       } finally {
@@ -68,7 +68,7 @@ const removeBotHome = (kernel: Kernel, botId: string) => {
     } finally {
       closeSync(child)
     }
-    if (native.unlinkat(directory, cstring(name), darwin ? 0x80 : 0x200) !== 0 && errno() !== 2)
+    if (native.unlinkat(directory, cstring(name), removeDirectoryFlag) !== 0 && errno() !== 2)
       throw new Error("Não foi possível remover a pasta do bot.")
   }
   try {

@@ -15,28 +15,28 @@ import {
   writeSync,
 } from "node:fs"
 import { basename, dirname, relative, resolve, sep } from "node:path"
+import { closeOnExec, errnoSymbol, libcLibrary, quotaExceeded } from "../platform/posix"
 import { TouriError } from "./errors"
 
 // Node's path APIs cannot pin ancestor directories during rename. These small POSIX
 // calls keep every operation relative to an O_NOFOLLOW directory descriptor.
-const native = dlopen(process.platform === "darwin" ? "/usr/lib/libSystem.B.dylib" : "libc.so.6", {
+const native = dlopen(libcLibrary, {
   openat: { args: ["i32", "cstring", "i32", "u32"], returns: "i32" },
   mkdirat: { args: ["i32", "cstring", "u32"], returns: "i32" },
   renameat: { args: ["i32", "cstring", "i32", "cstring"], returns: "i32" },
   unlinkat: { args: ["i32", "cstring", "i32"], returns: "i32" },
-  [process.platform === "darwin" ? "__error" : "__errno_location"]: { args: [], returns: "ptr" },
+  [errnoSymbol]: { args: [], returns: "ptr" },
 }).symbols
 
 const cstring = (text: string): Buffer => Buffer.from(`${text}\0`)
 const errno = (): number => {
-  const pointer = native[process.platform === "darwin" ? "__error" : "__errno_location"]?.()
+  const pointer = native[errnoSymbol]?.()
   return pointer ? read.i32(pointer) : 0
 }
-const closeOnExec = process.platform === "darwin" ? 0x1000000 : 0x80000
 const directoryFlags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW | closeOnExec
 const failure = (): TouriError => {
   const code = errno()
-  if (code === 28 || code === (process.platform === "darwin" ? 69 : 122)) return new TouriError("TOURI-E2002")
+  if (code === 28 || code === quotaExceeded) return new TouriError("TOURI-E2002")
   return new TouriError(code === 13 || code === 1 ? "TOURI-E2000" : "TOURI-E2001")
 }
 const openAt = (parent: number, name: string, flags: number, mode = 0): number =>

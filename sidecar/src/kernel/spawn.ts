@@ -1,11 +1,12 @@
 import { dlopen } from "bun:ffi"
 import { closeSync, createWriteStream, existsSync, read as readFd, write as writeFd } from "node:fs"
 import type { Kernel } from "@touri/contracts"
+import { libcLibrary } from "../platform/posix"
 
 type SpawnResult = ReturnType<Kernel["spawnTree"]>
 
 const openLegacyLibc = () =>
-  dlopen(process.platform === "darwin" ? "/usr/lib/libSystem.B.dylib" : "libc.so.6", {
+  dlopen(libcLibrary, {
     dup: { args: ["i32"], returns: "i32" },
   })
 let legacyLibc: ReturnType<typeof openLegacyLibc> | undefined

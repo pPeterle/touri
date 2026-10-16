@@ -342,10 +342,10 @@ test("missing image provides a build command pointing to prepared original sourc
   }
 })
 
-test("unsupported hosts warn without touching container commands or native Keychain", async () => {
+test("unsupported Apple hosts warn without touching container commands or native Keychain", async () => {
   const f = fixture()
   try {
-    for (const host of [{ platform: "linux" }, { arch: "x64" }, { osRelease: "24.0.0" }, { headless: true }]) {
+    for (const host of [{ arch: "x64" }, { osRelease: "24.0.0" }, { headless: true }]) {
       const calls: Array<string> = []
       const checks = await collectLocalChecks(
         f.kernel,
@@ -359,7 +359,7 @@ test("unsupported hosts warn without touching container commands or native Keych
       )
       expect(find(checks, "container").status).toBe("warn")
       expect(calls.some((item) => item.endsWith("container"))).toBe(false)
-      if (host.platform === "linux" || host.headless) expect(find(checks, "keychain").status).toBe("warn")
+      if ("headless" in host && host.headless) expect(find(checks, "keychain").status).toBe("warn")
     }
   } finally {
     f.close()
@@ -534,3 +534,29 @@ test("a failed output stream cancels its sibling instead of leaving a pending re
   expect(result).toEqual({ code: null, stdout: "", stderr: "", timedOut: false })
   expect(canceled).toBe(true)
 })
+
+for (const platform of ["linux", "win32"])
+  test(`${platform} doctor uses OCI and native secret store checks`, async () => {
+    const f = fixture()
+    const calls: Array<{ binary: string; args: string[] }> = []
+    try {
+      const checks = await collectLocalChecks(
+        f.kernel,
+        { PATH: "/login/shell/bin" },
+        async (binary, args, abort) => {
+          calls.push({ binary, args })
+          return command(binary, args, abort)
+        },
+        signal(),
+        { ...probes, platform },
+      )
+      expect(find(checks, "vm-system").status).toBe("pass")
+      expect(find(checks, "keychain").status).toBe("pass")
+      expect(calls.some((c) => c.binary.endsWith("container"))).toBe(false)
+      expect(calls.some((c) => c.args[0] === "info")).toBe(true)
+      expect(JSON.stringify(checks)).not.toContain("brew install")
+      expect(JSON.stringify(checks)).not.toContain("Apple Silicon")
+    } finally {
+      f.close()
+    }
+  })
