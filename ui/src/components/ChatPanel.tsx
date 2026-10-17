@@ -942,9 +942,11 @@ export const ChatPanel = ({
       visibleMessages.push(message)
   }
   const repeatDraft =
-    !group && bot && !activeRun
-      ? (repeatTaskDraft(bot, thread, visibleMessages) ??
-        (visibleMessages.length === 0 ? suggestedRoutineDraft(bot) : null))
+    bot && !activeRun
+      ? group
+        ? repeatTaskDraft(bot, thread, visibleMessages, group)
+        : (repeatTaskDraft(bot, thread, visibleMessages) ??
+          (visibleMessages.length === 0 ? suggestedRoutineDraft(bot) : null))
       : null
   const latestReply = [...visibleMessages].reverse().find((message) => message.role === "assistant")
   const connectDataReply =

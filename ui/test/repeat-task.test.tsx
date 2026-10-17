@@ -268,3 +268,69 @@ it("offers a recurring job's draft in the empty conversation without persisting 
   expect(screen.getByLabelText("Às")).toHaveValue("09:00")
   expect(f.api.calls.filter((call) => ["POST /routines", "PATCH /routines/:id"].includes(call.route))).toEqual([])
 }, 30000)
+
+it("sends a routine to a group the bot belongs to and reviews it as a group task", async () => {
+  const f = fixture()
+  const other = { ...f.bot, id: "bot-other", name: "Outro" }
+  const group = {
+    id: "group-email",
+    name: "Email Geral",
+    color: "#dc2626",
+    avatarShape: "cercle" as const,
+    avatarSeed: "group-email",
+    memberIds: [f.bot.id, other.id],
+    coordinatorBotId: null,
+    createdAt: 0,
+    updatedAt: 0,
+  }
+  const elsewhere = { ...group, id: "group-elsewhere", name: "Sem o bot", memberIds: [other.id] }
+  render(
+    <RoutineEditor
+      initial={f.draft}
+      bots={[f.bot, other]}
+      groups={[group, elsewhere]}
+      actions={f.actions}
+      host="server"
+      onClose={vi.fn()}
+    />,
+  )
+  const destination = screen.getByLabelText("Destino dos resultados")
+  expect(within(destination).getByRole("option", { name: "Conversa do grupo Email Geral" })).toBeInTheDocument()
+  expect(within(destination).queryByRole("option", { name: "Conversa do grupo Sem o bot" })).toBeNull()
+  fireEvent.change(destination, { target: { value: "group:group-email" } })
+  fireEvent.click(screen.getByRole("button", { name: "Revisar rotina" }))
+  expect(screen.getByText(/A tarefa Organizar notas será enviada ao grupo Email Geral/)).toBeVisible()
+  expect(screen.getByText(/Cada membro responde com as próprias permissões/)).toBeVisible()
+  expect(screen.queryByText("/workspace/notes")).toBeNull()
+  fireEvent.click(screen.getByRole("button", { name: "Ativar rotina" }))
+  await waitFor(() => expect(f.actions.createRoutine).toHaveBeenCalled())
+  expect(f.actions.createRoutine.mock.calls[0]?.[0]).toMatchObject({
+    groupId: "group-email",
+    continuity: "results-thread",
+    resultsThreadId: null,
+    enabled: true,
+  })
+})
+
+it("a task repeated from a group chat posts back into the same group conversation", () => {
+  const f = fixture()
+  const thread = { ...required(f.state.threads[0]), groupId: "group-email" }
+  const group = {
+    id: "group-email",
+    name: "Email Geral",
+    color: "#dc2626",
+    avatarShape: "cercle" as const,
+    avatarSeed: "group-email",
+    memberIds: ["bot-first", f.bot.id],
+    coordinatorBotId: f.bot.id,
+    createdAt: 0,
+    updatedAt: 0,
+  }
+  expect(repeatTaskDraft(f.bot, thread, f.state.messages, group)).toMatchObject({
+    botId: f.bot.id,
+    groupId: "group-email",
+    continuity: "results-thread",
+    resultsThreadId: thread.id,
+  })
+  expect(t("Conversa do grupo {group}", { group: "Email Geral" }, "en")).toBe("Group conversation Email Geral")
+})

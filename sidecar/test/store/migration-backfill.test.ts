@@ -31,6 +31,7 @@ import responseActivitySql from "../../src/kernel/migrations/0020.sql" with { ty
 import workspaceSql from "../../src/kernel/migrations/0021.sql" with { type: "text" }
 import boundedHistorySql from "../../src/kernel/migrations/0022.sql" with { type: "text" }
 import streamWriterSql from "../../src/kernel/migrations/0023.sql" with { type: "text" }
+import groupRoutinesSql from "../../src/kernel/migrations/0024.sql" with { type: "text" }
 import { TRANSCRIPT_RETENTION } from "../../src/kernel/transcript-storage"
 import { init as initStore } from "../../src/store"
 
@@ -210,6 +211,7 @@ test("interrupted batches resume idempotently and match the shipped synchronous 
     synchronous.exec(workspaceSql)
     synchronous.exec(boundedHistorySql)
     synchronous.exec(streamWriterSql)
+    synchronous.exec(groupRoutinesSql)
     database = openDatabase({ filename })
     expect(database.query("SELECT type, name, sql FROM sqlite_master ORDER BY name").all()).toEqual(
       synchronous.query("SELECT type, name, sql FROM sqlite_master ORDER BY name").all(),

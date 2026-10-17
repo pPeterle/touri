@@ -1199,3 +1199,160 @@ test("group recovery does not replay delegated work after a lost acknowledgement
   expect(f.runtime.retry(run.id)).toMatchObject({ success: false, errorCode: "CONFLICT" })
   expect(f.order).toHaveLength(before)
 })
+
+const routineEngine = (f: Awaited<ReturnType<typeof fixture>>) => {
+  const engine = createRuntimeEngine({ kernel: f.host.kernel, environment: { PATH: process.env.PATH ?? "" } })
+  cleanups.unshift(() => void engine.shutdown())
+  return engine
+}
+const groupRoutine = (
+  f: Awaited<ReturnType<typeof fixture>>,
+  patch: Partial<Parameters<ReturnType<typeof createRuntimeEngine>["createRoutine"]>[0]["input"]> = {},
+) => ({
+  botId: f.bots[1]?.id ?? "",
+  name: "Resumo de e-mails",
+  prompt: "Verifiquem os e-mails de hoje",
+  cron: "0 8 * * 1-5",
+  timezone: "America/Sao_Paulo",
+  enabled: false,
+  continuity: "results-thread" as const,
+  resultsThreadId: f.thread.id,
+  groupId: f.group.id,
+  timeoutMinutes: 30,
+  overlap: "skip" as const,
+  catchUpMinutes: 30,
+  ...patch,
+})
+
+test("a group routine posts its prompt into the group conversation and finishes with every member's reply", async () => {
+  const f = await fixture()
+  const engine = routineEngine(f)
+  const created = engine.createRoutine({ input: groupRoutine(f), forceDisabled: false })
+  if (!created.success) throw new Error(created.error)
+  const started = engine.runRoutine({ routineId: created.routine.id, triggerSource: "manual" })
+  if (!started.success) throw new Error(started.error)
+  expect(started.routineRun.threadId).toBe(f.thread.id)
+  await until(() => engine.listRoutineRuns(created.routine.id)[0]?.status === "succeeded")
+  expect(f.order).toEqual(f.group.memberIds)
+  const shared = f.store.activePath({ threadId: f.thread.id })
+  expect(shared[0]).toMatchObject({ role: "user", text: "Verifiquem os e-mails de hoje", sender: { name: "routine" } })
+  expect(shared.filter((m) => m.role === "assistant").map((m) => m.sender?.name)).toEqual(["pm", "dev", "qa"])
+  const finished = engine.listRoutineRuns(created.routine.id)[0]
+  expect(finished?.summary).toContain("pm: pm respondeu")
+  expect(finished?.summary).toContain("qa: qa respondeu")
+  expect(f.persistence.getRun(finished?.runId ?? "")?.routineRunId).toBe(finished?.id ?? "")
+})
+
+test("a group routine follows the coordinator and creates its own group conversation on the first run", async () => {
+  const f = await fixture()
+  const group = f.data.save({ ...f.input, coordinatorBotId: f.bots[2]?.id ?? null }, f.group)
+  const engine = routineEngine(f)
+  const created = engine.createRoutine({ input: groupRoutine(f, { resultsThreadId: null }), forceDisabled: false })
+  if (!created.success) throw new Error(created.error)
+  const started = engine.runRoutine({ routineId: created.routine.id, triggerSource: "manual" })
+  if (!started.success) throw new Error(started.error)
+  await until(() => engine.listRoutineRuns(created.routine.id)[0]?.status === "succeeded")
+  expect(f.order).toEqual([group.coordinatorBotId ?? ""])
+  const thread = f.store.getThread({ threadId: started.routineRun.threadId ?? "" })
+  expect(thread).toMatchObject({ groupId: group.id, groupThreadId: null })
+  expect(thread?.id).not.toBe(f.thread.id)
+  expect(engine.listRoutines().find((r) => r.id === created.routine.id)?.resultsThreadId).toBe(thread?.id ?? "")
+})
+
+test("a group routine turn uses the routine timeout instead of the per-bot chat limit", async () => {
+  const f = await fixture(async (_ctx, complete) => {
+    await Bun.sleep(150)
+    complete("feito")
+  }, 50)
+  const engine = routineEngine(f)
+  const created = engine.createRoutine({ input: groupRoutine(f, { prompt: "@dev verifique" }), forceDisabled: false })
+  if (!created.success) throw new Error(created.error)
+  engine.runRoutine({ routineId: created.routine.id, triggerSource: "manual" })
+  await until(() => engine.listRoutineRuns(created.routine.id)[0]?.status === "succeeded")
+  expect(f.order).toEqual([f.bots[1]?.id ?? ""])
+  // The same request typed by a user still hits the chat limit.
+  const chat = f.send("@dev verifique")
+  await until(() => f.persistence.getRun(chat.id)?.status === "failed")
+})
+
+test("group routines validate membership and destination, and agents cannot move a routine into a group", async () => {
+  const f = await fixture()
+  const engine = routineEngine(f)
+  const outsider = f.bots[3]?.id ?? ""
+  const privateThread = f.store.createThread({ botId: f.bots[1]?.id ?? "", kind: "chat", title: "Privada" })
+  if (!privateThread.success) throw new Error(privateThread.error)
+  const invalid = [
+    groupRoutine(f, { botId: outsider }),
+    groupRoutine(f, { groupId: "missing" }),
+    groupRoutine(f, { continuity: "main-thread", resultsThreadId: null }),
+    groupRoutine(f, { resultsThreadId: privateThread.thread.id }),
+    groupRoutine(f, { groupId: null }),
+  ]
+  for (const input of invalid)
+    expect(engine.createRoutine({ input, forceDisabled: false })).toMatchObject({
+      success: false,
+      errorCode: "INVALID_ARGS",
+    })
+  const own = engine.createRoutine({
+    input: groupRoutine(f, { groupId: null, resultsThreadId: privateThread.thread.id }),
+    forceDisabled: false,
+  })
+  if (!own.success) throw new Error(own.error)
+  expect(
+    engine.updateRoutine({
+      routineId: own.routine.id,
+      patch: { groupId: f.group.id, resultsThreadId: f.thread.id },
+      fromTool: true,
+      botId: f.bots[1]?.id ?? "",
+    }),
+  ).toMatchObject({ success: false, errorCode: "INVALID_ARGS" })
+  const moved = engine.updateRoutine({
+    routineId: own.routine.id,
+    patch: { groupId: f.group.id, resultsThreadId: f.thread.id, enabled: true },
+    fromTool: false,
+  })
+  expect(moved).toMatchObject({ success: true, routine: { groupId: f.group.id, enabled: true } })
+  const retargeted = engine.updateRoutine({
+    routineId: own.routine.id,
+    patch: { resultsThreadId: null },
+    fromTool: false,
+  })
+  expect(retargeted).toMatchObject({ success: true, routine: { enabled: false } })
+})
+
+test("a member removed from the group cannot run its group routine and leaves no stuck slot", async () => {
+  const f = await fixture()
+  const engine = routineEngine(f)
+  const created = engine.createRoutine({ input: groupRoutine(f), forceDisabled: false })
+  if (!created.success) throw new Error(created.error)
+  f.data.save({ ...f.input, memberIds: f.input.memberIds.filter((id) => id !== f.bots[1]?.id) }, f.group)
+  expect(engine.runRoutine({ routineId: created.routine.id, triggerSource: "manual" })).toMatchObject({
+    success: false,
+    errorCode: "INVALID_ARGS",
+  })
+  expect(engine.listRoutineRuns(created.routine.id)).toEqual([])
+  expect(f.order).toEqual([])
+})
+
+test("restart cancels a group routine run instead of leaving it running", async () => {
+  let f: Awaited<ReturnType<typeof fixture>>
+  f = await fixture(async () => {})
+  const engine = routineEngine(f)
+  const created = engine.createRoutine({ input: groupRoutine(f, { prompt: "@dev verifique" }), forceDisabled: false })
+  if (!created.success) throw new Error(created.error)
+  const started = engine.runRoutine({ routineId: created.routine.id, triggerSource: "manual" })
+  if (!started.success) throw new Error(started.error)
+  await until(() => f.order.length === 1)
+  f.runtime.shutdown()
+  await until(() => engine.listRoutineRuns(created.routine.id)[0]?.status === "canceled")
+  f.db.query("UPDATE runs SET status='running',finished_at=NULL WHERE id=?").run(started.routineRun.runId)
+  f.db.query("UPDATE routine_runs SET status='running',finished_at=NULL WHERE id=?").run(started.routineRun.id)
+  // A restarted process starts with a fresh engine, so nothing is cached yet.
+  routineEngine(f)
+  const recovered = createGroupRuntime(f.host.kernel, f.engine)
+  cleanups.unshift(() => recovered.shutdown())
+  expect(f.db.query("SELECT status, summary FROM routine_runs WHERE id = ?").get(started.routineRun.id)).toEqual({
+    status: "canceled",
+    summary: "Interrupted because touri restarted",
+  })
+})

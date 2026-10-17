@@ -239,6 +239,11 @@ export const ptBR = {
   "Contexto autorizado": "Contexto autorizado",
   "Histórico desta conversa e permissões atuais do bot.": "Histórico desta conversa e permissões atuais do bot.",
   "Permissões atuais do bot.": "Permissões atuais do bot.",
+  "Conversa do grupo {group}": "Conversa do grupo {group}",
+  "A tarefa {task} será enviada ao grupo {group}, {schedule}.":
+    "A tarefa {task} será enviada ao grupo {group}, {schedule}.",
+  "O grupo recebe a tarefa como uma mensagem sua. Cada membro responde com as próprias permissões; com coordenador, só ele recebe e chama os outros.":
+    "O grupo recebe a tarefa como uma mensagem sua. Cada membro responde com as próprias permissões; com coordenador, só ele recebe e chama os outros.",
   "Todas as pastas já autorizadas ao bot": "Todas as pastas já autorizadas ao bot",
   "Sem pasta externa autorizada.": "Sem pasta externa autorizada.",
   Fontes: "Fontes",
@@ -2185,6 +2190,11 @@ const englishOverrides: Partial<Record<TranslationKey, string>> = {
   "Histórico desta conversa e permissões atuais do bot.":
     "This conversation’s history and the bot’s current permissions.",
   "Permissões atuais do bot.": "The bot’s current permissions.",
+  "Conversa do grupo {group}": "Group conversation {group}",
+  "A tarefa {task} será enviada ao grupo {group}, {schedule}.":
+    "The task {task} will be sent to the group {group}, {schedule}.",
+  "O grupo recebe a tarefa como uma mensagem sua. Cada membro responde com as próprias permissões; com coordenador, só ele recebe e chama os outros.":
+    "The group receives the task as a message from you. Each member replies with its own permissions; with a coordinator, only the coordinator receives it and calls the others.",
   "Todas as pastas já autorizadas ao bot": "All folders already authorized for this bot",
   "Sem pasta externa autorizada.": "No external folder authorized.",
   Fontes: "Sources",

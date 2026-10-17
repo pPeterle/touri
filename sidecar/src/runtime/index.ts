@@ -53,10 +53,12 @@ const routineInput = ({
   args,
   botId,
   enabled,
+  groupId = null,
 }: {
   args: Record<string, unknown>
   botId: Id
   enabled: boolean
+  groupId?: Id | null
 }): Parameters<ReturnType<typeof createRuntimeEngine>["createRoutine"]>[0]["input"] => ({
   botId,
   name: stringField(args, "name"),
@@ -66,6 +68,7 @@ const routineInput = ({
   enabled,
   continuity: continuityField(args.continuity),
   resultsThreadId: typeof args.resultsThreadId === "string" ? args.resultsThreadId : null,
+  groupId,
   timeoutMinutes: numberField(args, "timeoutMinutes", 30),
   overlap: overlapField(args.overlap),
   catchUpMinutes: numberField(args, "catchUpMinutes", 30),
@@ -213,7 +216,12 @@ export const init = async (kernel: Kernel): Promise<void> => {
         handler: async ({ body }) => {
           const args = bodyRecord(body)
           const botId = stringField(args, "botId")
-          const input = routineInput({ args, botId, enabled: booleanField(args, "enabled", false) })
+          const input = routineInput({
+            args,
+            botId,
+            enabled: booleanField(args, "enabled", false),
+            groupId: typeof args.groupId === "string" ? args.groupId : null,
+          })
           const result = engine.createRoutine({ input, forceDisabled: false })
           return result.success
             ? { status: 201, json: { routine: result.routine } }
@@ -234,6 +242,7 @@ export const init = async (kernel: Kernel): Promise<void> => {
           if (args.continuity !== undefined) patch.continuity = continuityField(args.continuity)
           if (args.resultsThreadId === null || typeof args.resultsThreadId === "string")
             patch.resultsThreadId = args.resultsThreadId
+          if (args.groupId === null || typeof args.groupId === "string") patch.groupId = args.groupId
           if (args.timeoutMinutes !== undefined) patch.timeoutMinutes = numberField(args, "timeoutMinutes", 30)
           if (args.overlap !== undefined) patch.overlap = overlapField(args.overlap)
           if (args.catchUpMinutes !== undefined) patch.catchUpMinutes = numberField(args, "catchUpMinutes", 30)

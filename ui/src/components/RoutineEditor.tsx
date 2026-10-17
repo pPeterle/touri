@@ -1,4 +1,4 @@
-import type { Bot, Routine } from "@touri/contracts"
+import type { Bot, BotGroup, Routine } from "@touri/contracts"
 import { nextCronSlot, parseCron, validTimezone } from "@touri/contracts/routine-cron"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { t } from "../i18n"
@@ -42,6 +42,7 @@ export const RoutineEditor = ({
   initial,
   routineId,
   bots,
+  groups = [],
   host,
   actions,
   onClose,
@@ -49,6 +50,7 @@ export const RoutineEditor = ({
   initial: RoutineDraft
   routineId?: string | undefined
   bots: Bot[]
+  groups?: BotGroup[]
   host: "mac" | "server"
   actions: Pick<WorkspaceActions, "createRoutine" | "updateRoutine" | "runRoutine" | "deleteRoutine">
   onClose: () => void
@@ -66,7 +68,9 @@ export const RoutineEditor = ({
   const [error, setError] = useState<string | null>(null)
   const [tested, setTested] = useState(false)
   const bot = bots.find((bot) => bot.id === draft.botId)
-  const signature = JSON.stringify({ draft, bot })
+  const botGroups = groups.filter((group) => group.memberIds.includes(draft.botId))
+  const group = groups.find((group) => group.id === draft.groupId)
+  const signature = JSON.stringify({ draft, bot, group })
   const review = reviewed === signature
   useEffect(() => {
     // Move focus to the reviewed content after the form controls are removed.
@@ -76,6 +80,7 @@ export const RoutineEditor = ({
   const dates = useMemo(() => nextRoutineDates(draft.cron, draft.timezone, Date.now()), [draft.cron, draft.timezone])
   const valid =
     !!bot &&
+    (!draft.groupId || botGroups.some((candidate) => candidate.id === draft.groupId)) &&
     !!draft.name.trim() &&
     draft.name.length <= 80 &&
     !!draft.prompt.trim() &&
@@ -121,8 +126,9 @@ export const RoutineEditor = ({
       setBusy(false)
     }
   }
-  const destination =
-    draft.continuity === "new-thread"
+  const destination = group
+    ? t("Conversa do grupo {group}", { group: group.name })
+    : draft.continuity === "new-thread"
       ? t("Nova conversa por execução")
       : draft.continuity === "results-thread"
         ? draft.resultsThreadId
@@ -165,7 +171,12 @@ export const RoutineEditor = ({
                       value={draft.botId}
                       disabled={!!savedId}
                       onChange={(event) =>
-                        update({ botId: event.target.value, resultsThreadId: null, continuity: "main-thread" })
+                        update({
+                          botId: event.target.value,
+                          resultsThreadId: null,
+                          groupId: null,
+                          continuity: "main-thread",
+                        })
                       }
                     >
                       {bots.map((bot) => (
@@ -276,14 +287,34 @@ export const RoutineEditor = ({
                 <label>
                   {t("Destino dos resultados")}
                   <select
-                    value={draft.continuity}
-                    onChange={(event) => update({ continuity: event.target.value as Routine["continuity"] })}
+                    value={draft.groupId ? `group:${draft.groupId}` : draft.continuity}
+                    onChange={(event) => {
+                      const groupId = event.target.value.startsWith("group:") ? event.target.value.slice(6) : null
+                      if (groupId)
+                        update({
+                          groupId,
+                          continuity: "results-thread",
+                          // Keep a conversation of the same group, such as the one the task was scheduled from.
+                          resultsThreadId: groupId === initial.groupId ? initial.resultsThreadId : null,
+                        })
+                      else
+                        update({
+                          groupId: null,
+                          continuity: event.target.value as Routine["continuity"],
+                          resultsThreadId: initial.groupId ? null : initial.resultsThreadId,
+                        })
+                    }}
                   >
                     <option value="main-thread">{t("Conversa principal")}</option>
                     <option value="new-thread">{t("Nova conversa por execução")}</option>
                     <option value="results-thread">
-                      {draft.resultsThreadId ? t("Nesta conversa") : t("Conversa de resultados")}
+                      {draft.resultsThreadId && !draft.groupId ? t("Nesta conversa") : t("Conversa de resultados")}
                     </option>
+                    {botGroups.map((candidate) => (
+                      <option key={candidate.id} value={`group:${candidate.id}`}>
+                        {t("Conversa do grupo {group}", { group: candidate.name })}
+                      </option>
+                    ))}
                   </select>
                 </label>
                 <details open={!simple}>
@@ -329,11 +360,17 @@ export const RoutineEditor = ({
             ) : (
               <section ref={reviewRef} tabIndex={-1} className="routine-review" aria-label={t("Revisar rotina")}>
                 <p className="routine-summary">
-                  {t("{bot} fará {task}, {schedule}.", {
-                    bot: bot?.name ?? "",
-                    task: draft.name,
-                    schedule: routineSchedule(draft.cron, draft.timezone).replace(/^De /, "de "),
-                  })}
+                  {group
+                    ? t("A tarefa {task} será enviada ao grupo {group}, {schedule}.", {
+                        task: draft.name,
+                        group: group.name,
+                        schedule: routineSchedule(draft.cron, draft.timezone).replace(/^De /, "de "),
+                      })
+                    : t("{bot} fará {task}, {schedule}.", {
+                        bot: bot?.name ?? "",
+                        task: draft.name,
+                        schedule: routineSchedule(draft.cron, draft.timezone).replace(/^De /, "de "),
+                      })}
                 </p>
                 <h3>{t("Tarefa")}</h3>
                 <p className="routine-instruction">{draft.prompt}</p>
@@ -343,29 +380,39 @@ export const RoutineEditor = ({
             )}
             <section className="routine-context" aria-label={t("Contexto autorizado")}>
               <h3>{t("Contexto autorizado")}</h3>
-              <p>
-                {draft.continuity === "results-thread" && draft.resultsThreadId
-                  ? t("Histórico desta conversa e permissões atuais do bot.")
-                  : t("Permissões atuais do bot.")}
-              </p>
-              {bot?.anyFolderAccess ? (
-                <p>{t("Todas as pastas já autorizadas ao bot")}</p>
-              ) : (
-                <ul>
-                  {[...new Set([bot?.cwd, ...(bot?.folders ?? []).map((folder) => folder.path)].filter(Boolean))].map(
-                    (path) => (
-                      <li key={path}>{path}</li>
-                    ),
-                  )}
-                </ul>
-              )}
-              {!bot?.cwd && !bot?.folders?.length && !bot?.anyFolderAccess && (
-                <p>{t("Sem pasta externa autorizada.")}</p>
-              )}
-              {!!bot?.mcpServers?.length && (
+              {group ? (
                 <p>
-                  {t("Fontes")}: {bot.mcpServers.map((server) => server.name).join(", ")}
+                  {t(
+                    "O grupo recebe a tarefa como uma mensagem sua. Cada membro responde com as próprias permissões; com coordenador, só ele recebe e chama os outros.",
+                  )}
                 </p>
+              ) : (
+                <>
+                  <p>
+                    {draft.continuity === "results-thread" && draft.resultsThreadId
+                      ? t("Histórico desta conversa e permissões atuais do bot.")
+                      : t("Permissões atuais do bot.")}
+                  </p>
+                  {bot?.anyFolderAccess ? (
+                    <p>{t("Todas as pastas já autorizadas ao bot")}</p>
+                  ) : (
+                    <ul>
+                      {[
+                        ...new Set([bot?.cwd, ...(bot?.folders ?? []).map((folder) => folder.path)].filter(Boolean)),
+                      ].map((path) => (
+                        <li key={path}>{path}</li>
+                      ))}
+                    </ul>
+                  )}
+                  {!bot?.cwd && !bot?.folders?.length && !bot?.anyFolderAccess && (
+                    <p>{t("Sem pasta externa autorizada.")}</p>
+                  )}
+                  {!!bot?.mcpServers?.length && (
+                    <p>
+                      {t("Fontes")}: {bot.mcpServers.map((server) => server.name).join(", ")}
+                    </p>
+                  )}
+                </>
               )}
               <p>{t("Esta rotina não concede novos acessos. Mudanças de permissões do bot também afetam a rotina.")}</p>
             </section>
