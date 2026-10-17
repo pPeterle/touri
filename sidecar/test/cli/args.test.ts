@@ -93,6 +93,10 @@ test("the deprecated importer name still parses as import legacy", () => {
 test("mcp-stdio, version and help", () => {
   expect(parseCli(["mcp-stdio", "--thread", "t1"])).toMatchObject({ command: { name: "mcp-stdio", threadId: "t1" } })
   expect(parseCli(["mcp-stdio"]).success).toBe(false)
+  expect(parseCli(["mcp-stdio", "--thread", "t1"])).not.toHaveProperty("command.dataDir")
+  expect(parseCli(["mcp-stdio", "--thread", "t1", "--data-dir", "/srv/touri"])).toMatchObject({
+    command: { name: "mcp-stdio", threadId: "t1", dataDir: "/srv/touri" },
+  })
   expect(parseCli(["--version"])).toEqual({ success: true, command: { name: "version" } })
   expect(parseCli([])).toEqual({ success: true, command: { name: "help" } })
   expect(parseCli(["serve", "--help"])).toEqual({ success: true, command: { name: "help" } })

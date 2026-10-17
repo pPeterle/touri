@@ -189,7 +189,10 @@ const runProfileLogin = async (command: Extract<CliCommand, { name: "profile-log
 }
 
 const runMcp = async (command: Extract<CliCommand, { name: "mcp-stdio" }>): Promise<number> => {
-  await runMcpStdio({ threadId: command.threadId, appData: command.dataDir })
+  await runMcpStdio({
+    threadId: command.threadId,
+    ...(command.dataDir === undefined ? {} : { appData: command.dataDir }),
+  })
   return Number(process.exitCode ?? 0)
 }
 

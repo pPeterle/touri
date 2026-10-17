@@ -32,7 +32,7 @@ export type CliCommand =
   | { name: "doctor"; dataDir: string; port: number }
   | { name: "devices"; dataDir: string; revokeId: string | null }
   | { name: "import-legacy"; dataDir: string; path: string; dryRun: boolean; importCodexSessions: boolean }
-  | { name: "mcp-stdio"; threadId: string; dataDir: string }
+  | { name: "mcp-stdio"; threadId: string; dataDir?: string }
   | { name: "profile-list"; dataDir: string }
   | { name: "profile-login"; dataDir: string; profile: string; provider: "claude" | "codex" }
   | { name: "version" }
@@ -223,7 +223,12 @@ export const parseCli = (argv: Array<string>): ParseCliResult => {
   if (command === "mcp-stdio") {
     const threadId = flags.values["--thread"]
     if (threadId === undefined) return { success: false, error: "mcp-stdio needs --thread <id>" }
-    return { success: true, command: { name: "mcp-stdio", threadId, dataDir: dataDirOf(flags) } }
+    // Without --data-dir the shim follows TOURI_APP_DATA, which `serve` sets for the bots' CLI.
+    const dataDir = flags.values["--data-dir"]
+    return {
+      success: true,
+      command: { name: "mcp-stdio", threadId, ...(dataDir === undefined ? {} : { dataDir: expandHome(dataDir) }) },
+    }
   }
   return { success: false, error: `Unknown command ${command}` }
 }
