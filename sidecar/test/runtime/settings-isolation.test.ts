@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Bot, Kernel, ProviderEvent, ProviderSession, StartTurnArgs, Thread } from "@touri/contracts"
 import { createKernel } from "../../src/kernel"
+import { folderGuestPath } from "../../src/kernel/bot-folders"
 import { createClaudeAdapter } from "../../src/runtime/claude/adapter"
 import { readOnlyAllow, readOnlyDeny } from "../../src/runtime/claude/settings"
 import { createCodexAdapter } from "../../src/runtime/codex/adapter"
@@ -250,6 +251,7 @@ for (const vm of [false, true]) {
       for (const resumed of [false, true]) {
         test(`Codex explicitly sets ${vm ? "VM" : "host"} ${access}/${approvals} ${resumed ? "resume" : "new"} policy`, async () => {
           const f = fixture(vm, "codex")
+          const outer = !vm && process.platform === "darwin"
           f.args.bot.access = access
           f.args.bot.approvals = approvals
           if (resumed) f.args.session = { externalSessionId: "old-session", rolloutPath: null } as ProviderSession
@@ -260,7 +262,8 @@ for (const vm of [false, true]) {
           if (access === "full") {
             expect(f.calls[0]?.args).toContain('sandbox_mode="danger-full-access"')
             expect(f.calls[0]?.args).toContain(`approval_policy=${JSON.stringify(approvals)}`)
-          } else if (access === "read-only") expect(f.calls[0]?.args).toContain('sandbox_mode="read-only"')
+          } else if (access === "read-only")
+            expect(f.calls[0]?.args).toContain(outer ? 'sandbox_mode="danger-full-access"' : 'sandbox_mode="read-only"')
           const requests = readFileSync(requestLogPath, "utf8")
             .trim()
             .split("\n")
@@ -268,7 +271,8 @@ for (const vm of [false, true]) {
           const session = requests.find((request) => request.method === (resumed ? "thread/resume" : "thread/start"))
           expect(session?.params).toMatchObject({
             cwd: f.workspace,
-            sandbox: access === "full" ? "danger-full-access" : access,
+            // On macOS host turns touri's Seatbelt profile is the boundary; Codex cannot nest its own.
+            sandbox: access === "full" || outer ? "danger-full-access" : access,
             approvalPolicy: access === "read-only" ? "never" : approvals,
             approvalsReviewer: "user",
           })
@@ -317,39 +321,55 @@ for (const vm of [false, true]) {
   })
 }
 
-for (const provider of ["claude", "codex"] as const) {
-  test(`${provider} receives folder grants through CLI policy and the inherited host sandbox`, async () => {
-    const f = fixture(false, provider)
-    const ro = join(f.root, "reference")
-    const rw = join(f.root, "writable")
-    mkdirSync(ro)
-    mkdirSync(rw)
-    // macOS temp roots may be spelled /var rather than /private/var.
-    const { realpathSync } = await import("node:fs")
-    f.args.bot.access = "workspace-write"
-    f.args.bot.folders = [
-      { path: realpathSync(ro), access: "read-only" },
-      { path: realpathSync(rw), access: "read-write" },
-    ]
-    const requestLogPath = join(f.root, "folder-requests.jsonl")
-    writeFileSync(f.scenario, JSON.stringify({ events: [{ type: "complete" }], requestLogPath }))
-    expect((await f.adapter.startTurn(f.args)).success).toBe(true)
-    expect(f.calls[0]?.cmd).toBe("/usr/bin/sandbox-exec")
-    if (provider === "claude") {
-      const cli = f.calls[0]?.args ?? []
-      expect(cli).toContain(realpathSync(ro))
-      expect(cli).toContain(realpathSync(rw))
-      const added = cli.flatMap((arg, i) => (arg === "--add-dir" ? [cli[i + 1]] : []))
-      expect(added).toContain(realpathSync(ro))
-      expect(added).toContain(realpathSync(rw))
-    } else {
-      const requests = readFileSync(requestLogPath, "utf8")
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line))
-      const request = requests.find((request) => request.method === "thread/start")
-      expect(request.params.config.sandbox_workspace_write.writable_roots).toContain(realpathSync(rw))
-      expect(request.params.config.sandbox_workspace_write.writable_roots).not.toContain(realpathSync(ro))
-    }
-  })
-}
+for (const provider of ["claude", "codex"] as const)
+  for (const vm of [false, true])
+    test(`${provider} folder grants preserve CLI policy and require ${vm ? "guest execution" : "a host sandbox"}`, async () => {
+      const f = fixture(vm, provider)
+      const ro = join(f.root, "reference")
+      const rw = join(f.root, "writable")
+      mkdirSync(ro)
+      mkdirSync(rw)
+      // macOS temp roots may be spelled /var rather than /private/var.
+      const { realpathSync } = await import("node:fs")
+      f.args.bot.access = "workspace-write"
+      f.args.bot.folders = [
+        { path: realpathSync(ro), access: "read-only" },
+        { path: realpathSync(rw), access: "read-write" },
+      ]
+      const requestLogPath = join(f.root, "folder-requests.jsonl")
+      writeFileSync(f.scenario, JSON.stringify({ events: [{ type: "complete" }], requestLogPath }))
+      const result = await f.adapter.startTurn(f.args)
+      if (!vm && process.platform !== "darwin") {
+        expect(result).toMatchObject({ success: false, errorCode: "cli_crash" })
+        if (!result.success) expect(result.error).toContain("sandbox do macOS")
+        expect(f.calls).toHaveLength(0)
+        return
+      }
+      expect(result.success).toBe(true)
+      expect(f.calls[0]?.cmd).toBe(vm ? provider : "/usr/bin/sandbox-exec")
+      const grantedRO = vm ? folderGuestPath(realpathSync(ro)) : realpathSync(ro)
+      const grantedRW = vm ? folderGuestPath(realpathSync(rw)) : realpathSync(rw)
+      if (provider === "claude") {
+        const cli = f.calls[0]?.args ?? []
+        expect(cli).toContain(grantedRO)
+        expect(cli).toContain(grantedRW)
+        const added = cli.flatMap((arg, i) => (arg === "--add-dir" ? [cli[i + 1]] : []))
+        expect(added).toContain(grantedRO)
+        expect(added).toContain(grantedRW)
+      } else {
+        const requests = readFileSync(requestLogPath, "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line))
+        const request = requests.find((request) => request.method === "thread/start")
+        if (!vm && process.platform === "darwin") {
+          expect(request.params.sandbox).toBe("danger-full-access")
+          const profile = f.calls[0]?.args[1] ?? ""
+          expect(profile).toContain(`(subpath ${JSON.stringify(grantedRW)})`)
+          expect(profile).toContain(`(deny file-write* (subpath ${JSON.stringify(grantedRO)}))`)
+        } else {
+          expect(request.params.config.sandbox_workspace_write.writable_roots).toContain(grantedRW)
+          expect(request.params.config.sandbox_workspace_write.writable_roots).not.toContain(grantedRO)
+        }
+      }
+    })

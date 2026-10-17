@@ -1,13 +1,25 @@
 import type { Database } from "bun:sqlite"
-import { expect, test } from "bun:test"
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { expect, mock, test } from "bun:test"
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import type { Message, Run } from "@touri/contracts"
+import type { ApprovalPart, Message, Run } from "@touri/contracts"
 import { createKernel } from "../../src/kernel"
 import { init as initNotify } from "../../src/notify"
+import { createProjectStore } from "../../src/projects/repository"
+import { createSetupTools } from "../../src/projects/setup-tools"
 import { continuationMarkers } from "../../src/runtime/continuations"
 import { createRuntimeEngine } from "../../src/runtime/engine"
+import * as folderAccess from "../../src/runtime/folder-access"
 import { createWorkState } from "../../src/runtime/work-state"
 import { init as initStore } from "../../src/store"
 
@@ -28,7 +40,7 @@ const PAUSED = { pauseAfterFirstDelta: "release", ignoreInterrupt: true, deltas:
  * A fake Codex on a real store. `crash-once` makes the next provider process exit mid-turn;
  * every other turn follows scenario.json.
  */
-const fixture = async () => {
+const fixture = async ({ resumeBackoffMs = 50 }: { resumeBackoffMs?: number } = {}) => {
   const root = mkdtempSync(join(tmpdir(), "touri-resume-"))
   // Recovery fixtures must not depend on a provider reading touri's private data.
   const assets = mkdtempSync(join(tmpdir(), "touri-resume-provider-"))
@@ -80,7 +92,7 @@ exec '${process.execPath}' '${fake}' "$@"
     if (!store) throw new Error("Store missing")
     return { runtime, engine, store, db: runtime.kernel.db as Database }
   }
-  const first = await open({ resumeBackoffMs: 50 })
+  const first = await open({ resumeBackoffMs })
   first.db.exec(`INSERT INTO bots(id,name,provider,home_dir,created_at,updated_at) VALUES ('b','Teste','codex','/tmp',1,1);
     INSERT INTO threads(id,bot_id,title,created_at,updated_at) VALUES ('t','b','Conversa',1,1);`)
   const send = (engine: Engine, text = "Tarefa longa"): Run => {
@@ -160,6 +172,96 @@ exec '${process.execPath}' '${fake}' "$@"
     },
   }
 }
+
+test("an approved folder write grant automatically continues with updated Codex writable roots", async () => {
+  // The fixture provider only speaks JSON-RPC. Assert the generated sandbox policy
+  // separately so this lifecycle test also runs on Linux without Seatbelt.
+  const f = await fixture()
+  const original = { ...folderAccess }
+  mock.module("../../src/runtime/folder-access", () => ({
+    ...original,
+    spawnFolderProvider: (
+      kernel: Parameters<typeof original.spawnFolderProvider>[0],
+      args: Parameters<typeof original.spawnFolderProvider>[1],
+      input: Parameters<typeof original.spawnFolderProvider>[2],
+    ) => {
+      const profile = original.localFolderProfile(kernel, args, input.env)
+      for (const folder of args.bot.folders ?? [])
+        expect(profile.includes(`(deny file-write* (subpath ${JSON.stringify(folder.path)}))`)).toBe(
+          folder.access === "read-only",
+        )
+      return kernel.spawnTree(input)
+    },
+  }))
+  try {
+    mkdirSync(join(f.assets, "output"))
+    const folder = realpathSync(join(f.assets, "output"))
+    const target = join(folder, "images")
+    f.first.db
+      .query("UPDATE bots SET folders_json=? WHERE id='b'")
+      .run(JSON.stringify([{ path: folder, access: "read-only" }]))
+    f.first.runtime.kernel.services.provide("approvals.present", f.first.engine.approvalBridge.present)
+    f.first.runtime.kernel.services.provide("runtime.continueAfterApproval", f.first.engine.continueAfterApproval)
+    f.disableResume()
+    const run = f.send(f.first.engine, "Salve as imagens na subpasta solicitada")
+    await waitFor(f.streamed("INÍCIO"))
+    const tool = createSetupTools({
+      kernel: f.first.runtime.kernel,
+      store: createProjectStore({ kernel: f.first.runtime.kernel }),
+    }).find((tool) => tool.name === "folder_access_request")
+    if (!tool) throw new Error("Missing folder tool")
+    const call = tool.handler({
+      ctx: {
+        botId: "b",
+        threadId: "t",
+        runId: run.id,
+        projectId: null,
+        cwd: folder,
+        signal: new AbortController().signal,
+      },
+      args: { path: target, mode: "read-write" },
+    })
+    let card: ApprovalPart | undefined
+    await waitFor(() => {
+      card = f.first.store
+        .activePath({ threadId: "t" })
+        .flatMap((message) => message.parts)
+        .find((part): part is ApprovalPart => part.type === "approval" && part.decision === "pending")
+      return !!card
+    })
+    if (!card) throw new Error("Missing approval")
+    expect(existsSync(target)).toBe(false)
+    expect((await f.first.engine.answerApproval({ approvalId: card.approvalId, decision: "approved" })).success).toBe(
+      true,
+    )
+    expect(await call).toMatchObject({ success: true, structured: { automaticContinuation: true } })
+    expect(existsSync(target)).toBe(true)
+    f.writeScenario({ deltas: ["Imagens salvas."] })
+    f.release()
+    await waitFor(() => f.runs().length === 2 && f.runs().every((run) => run.status === "succeeded"))
+    expect(f.links()).toMatchObject([{ previous_run_id: run.id, reason: "permission_granted" }])
+    expect(f.markers()).toMatchObject([{ text: continuationMarkers.permission_granted }])
+    const sessions = f.frames().filter((frame) => frame.method === "thread/start")
+    expect(sessions).toHaveLength(2)
+    // On macOS the grant lives in touri's Seatbelt profile (asserted in the spawn mock above), not in
+    // Codex's writable roots, because Codex cannot nest its own sandbox there.
+    if (process.platform !== "darwin") {
+      expect(JSON.stringify(sessions[0]?.params.config)).not.toContain(folder)
+      expect(JSON.stringify(sessions[1]?.params.config)).toContain(folder)
+    }
+    expect(
+      JSON.stringify(
+        f
+          .frames()
+          .filter((frame) => frame.method === "turn/start")
+          .at(-1)?.params.input,
+      ),
+    ).toContain("The approved configuration is now applied")
+  } finally {
+    await f.close()
+    mock.module("../../src/runtime/folder-access", () => original)
+  }
+}, 30_000)
 
 test("app restart continues an interrupted turn in the same provider session", async () => {
   const f = await fixture()
@@ -379,6 +481,42 @@ test("a routine interrupted by a restart continues within its timeout instead of
     await f.close()
   }
 }, 30_000)
+
+test("deleting a routine during crash backoff prevents its automatic continuation", async () => {
+  const f = await fixture({ resumeBackoffMs: 500 })
+  try {
+    f.writeScenario({ events: [{ type: "complete" }] })
+    f.crashOnce()
+    const created = f.first.engine.createRoutine({
+      forceDisabled: false,
+      input: {
+        botId: "b",
+        name: "Notes",
+        prompt: "Summarize notes",
+        cron: "0 9 * * *",
+        timezone: "UTC",
+        enabled: true,
+        continuity: "main-thread",
+        resultsThreadId: null,
+        timeoutMinutes: 30,
+        overlap: "queue",
+        catchUpMinutes: 30,
+      },
+    })
+    if (!created.success) throw new Error(created.error)
+    f.first.db.exec("UPDATE bots SET main_thread_id = 't' WHERE id = 'b'")
+    const started = f.first.engine.runRoutine({ routineId: created.routine.id, triggerSource: "manual" })
+    if (!started.success) throw new Error(started.error)
+    await waitFor(() => f.runs()[0]?.status === "failed")
+    expect(f.first.engine.deleteRoutine(created.routine.id).success).toBe(true)
+    await Bun.sleep(700)
+    expect(f.runs()).toHaveLength(1)
+    expect(f.links()).toHaveLength(0)
+    expect(f.first.engine.listRoutines()).toEqual([])
+  } finally {
+    await f.close()
+  }
+})
 
 test("a routine past its timeout is canceled after a restart, as before", async () => {
   const f = await fixture()

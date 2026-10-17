@@ -1,4 +1,4 @@
-import { act, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react"
+import { act, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react"
 import type { Message, Run, UiEvent, UiEventEnvelope } from "@touri/contracts"
 import { afterEach, expect, test, vi } from "vitest"
 import App from "../src/App"
@@ -345,6 +345,95 @@ test("an expired WebSocket cursor signals resync and resumes without reconnectin
   stop()
 })
 
+test("a cold start waits for the stream head and loads once instead of replaying history", async () => {
+  vi.useFakeTimers()
+  class Socket extends EventTarget {
+    static instances: Socket[] = []
+    close = vi.fn()
+    constructor(public url: URL) {
+      super()
+      Socket.instances.push(this)
+    }
+  }
+  vi.stubGlobal("WebSocket", Socket)
+  const api = createApiClient({
+    endpoint: { baseUrl: "http://127.0.0.1:1", wsUrl: "ws://127.0.0.1:1/events", token: "token" },
+    fetchImpl: async () => Response.json({ ticket: "single-use-test" }),
+  })
+  const received: UiEventEnvelope[] = []
+  const stop = api.subscribe((event) => received.push(event))
+  let ready = false
+  void api.cursorReady?.().then(() => {
+    ready = true
+  })
+  await vi.advanceTimersByTimeAsync(0)
+  const socket = Socket.instances[0]
+  expect(socket?.url.searchParams.get("since")).toBe("0")
+  socket?.dispatchEvent(new Event("open"))
+  expect(ready).toBe(false)
+  socket?.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ type: "resync", lastSeq: 2400 }) }))
+  await vi.advanceTimersByTimeAsync(0)
+  expect(ready).toBe(true)
+  // The pending first load covers history, so the cold frame is not a second reload.
+  expect(received).toEqual([])
+  socket?.dispatchEvent(
+    new MessageEvent("message", { data: JSON.stringify({ seq: 2401, at: 1, event: { type: "run.updated", run } }) }),
+  )
+  expect(received.map((row) => row.seq)).toEqual([2401])
+  // A later expired cursor still asks for a reload.
+  socket?.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ type: "resync", lastSeq: 2500 }) }))
+  expect(received.map((row) => row.event.type)).toEqual(["run.updated", "transcript.resync"])
+  stop()
+})
+
+test("the first load does not wait forever for an event socket that never opens", async () => {
+  vi.useFakeTimers()
+  vi.stubGlobal(
+    "WebSocket",
+    class extends EventTarget {
+      close = vi.fn()
+    },
+  )
+  const api = createApiClient({
+    endpoint: { baseUrl: "http://127.0.0.1:1", wsUrl: "ws://127.0.0.1:1/events", token: "token" },
+    fetchImpl: async () => Response.json({ ticket: "single-use-test" }),
+  })
+  const stop = api.subscribe(() => undefined)
+  let ready = false
+  void api.cursorReady?.().then(() => {
+    ready = true
+  })
+  await vi.advanceTimersByTimeAsync(2_999)
+  expect(ready).toBe(false)
+  await vi.advanceTimersByTimeAsync(1)
+  expect(ready).toBe(true)
+  stop()
+})
+
+test("reconnecting the event stream does not reload every conversation", async () => {
+  const mock = createMockApi()
+  const request = vi.fn(mock.request) as unknown as ApiRequest
+  let connection: ((connected: boolean) => void) | undefined
+  const api = {
+    ...mock,
+    request,
+    isMock: false,
+    subscribeConnection: (listener: (connected: boolean) => void) => {
+      connection = listener
+      return () => undefined
+    },
+  }
+  const view = renderHook(() => useWorkspace(api))
+  await waitFor(() => expect(view.result.current.data.loading).toBe(false))
+  const loads = () => vi.mocked(request).mock.calls.filter(([route]) => route === "GET /bots").length
+  expect(loads()).toBe(1)
+  act(() => connection?.(false))
+  act(() => connection?.(true))
+  await act(async () => undefined)
+  expect(loads()).toBe(1)
+  view.unmount()
+})
+
 test("resync refetches the thread snapshot and replaces text lost outside the retention window", async () => {
   const api = createMockApi()
   const hook = renderHook(() => useWorkspace(api))
@@ -590,13 +679,7 @@ test("delivery states and interrupted tools render in Portuguese", () => {
     ],
   })
   render(<VirtualMessageList messages={rows} onSwitchBranch={() => undefined} onRetry={async () => undefined} />)
-  for (const label of [
-    "Na fila · aguardando conexão",
-    "Enviada · aguardando confirmação",
-    "Entregue",
-    "Falha na entrega",
-    "Encerrado",
-  ])
+  for (const label of ["Na fila · aguardando conexão", "Enviando…", "Entregue", "Falha na entrega", "Encerrado"])
     expect(screen.getByText(label)).toBeInTheDocument()
   expect(screen.queryByText("Em execução")).toBeNull()
 })
@@ -618,8 +701,8 @@ test("an interrupted run with a streaming snapshot renders interruption and retr
       onRetry={async () => undefined}
     />,
   )
-  expect(screen.getByText("A resposta foi interrompida ao reiniciar o touri")).toBeVisible()
-  expect(screen.getByRole("button", { name: "Tentar novamente" })).toBeVisible()
+  expect(screen.getByText("A resposta foi interrompida. Algumas ações podem ter sido concluídas.")).toBeVisible()
+  expect(screen.getByRole("button", { name: "Retomar tarefa" })).toBeVisible()
   expect(screen.queryByText("Cancelado")).toBeNull()
 })
 
@@ -640,7 +723,8 @@ test("a restored live run exposes Parar and continues streaming until completion
       ? ({ runs: [active] } as never)
       : api.request(route, input, pathValues)
   render(<App kernel={{ services: { api: { ...api, request } } }} />)
-  expect(await screen.findByRole("button", { name: "Parar" })).toBeVisible()
+  const composer = await screen.findByRole("form", { name: "Compor mensagem" })
+  expect(await within(composer).findByRole("button", { name: "Parar" }, { timeout: 5000 })).toBeVisible()
   act(() =>
     api.emit({
       type: "message.delta",
@@ -652,7 +736,7 @@ test("a restored live run exposes Parar and continues streaming until completion
       updatedSeq: 11,
     }),
   )
-  expect(await screen.findByText("INÍCIO FIM")).toBeVisible()
+  expect(await within(screen.getByTestId("virtual-message-list")).findByText("INÍCIO FIM")).toBeVisible()
   act(() => {
     api.emit({
       type: "message.updated",

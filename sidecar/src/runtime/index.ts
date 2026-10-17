@@ -1,5 +1,13 @@
 import type { Database } from "bun:sqlite"
-import type { Id, Kernel, RouteModule, Routine, ToolHandler, ToolResult } from "@touri/contracts"
+import {
+  describeRoutineSchedule,
+  type Id,
+  type Kernel,
+  type RouteModule,
+  type Routine,
+  type ToolHandler,
+  type ToolResult,
+} from "@touri/contracts"
 import { createGroupRuntime } from "../groups/runtime"
 import { buildChildEnv } from "../kernel/shell-env"
 import { createRuntimeEngine } from "./engine"
@@ -57,14 +65,15 @@ const routineInput = ({
   timezone: stringField(args, "timezone"),
   enabled,
   continuity: continuityField(args.continuity),
-  resultsThreadId: null,
+  resultsThreadId: typeof args.resultsThreadId === "string" ? args.resultsThreadId : null,
   timeoutMinutes: numberField(args, "timeoutMinutes", 30),
-  overlap: "skip",
-  catchUpMinutes: 30,
+  overlap: overlapField(args.overlap),
+  catchUpMinutes: numberField(args, "catchUpMinutes", 30),
 })
 
 export const init = async (kernel: Kernel): Promise<void> => {
   const engine = createRuntimeEngine({ kernel })
+  await engine.ready
   const groups = createGroupRuntime(kernel, engine)
   kernel.services.provide("groups.runtime", groups)
   const scheduler = createRoutineScheduler({ kernel, engine })
@@ -77,6 +86,7 @@ export const init = async (kernel: Kernel): Promise<void> => {
   kernel.services.provide("approvals.approve", engine.approvalBridge.approve)
   kernel.services.provide("approvals.settle", engine.approvalBridge.settle)
   kernel.services.provide("runtime.activeRun", ({ threadId }) => engine.activeRun({ threadId }))
+  kernel.services.provide("runtime.continueAfterApproval", engine.continueAfterApproval)
   kernel.services.provide("runtime.cancelBotTurns", engine.cancelBotTurns)
   kernel.services.provide("runtime.shutdown", async () => {
     scheduler.stop()
@@ -179,7 +189,10 @@ export const init = async (kernel: Kernel): Promise<void> => {
       {
         method: "GET",
         path: "/routines",
-        handler: async ({ query }) => ({ status: 200, json: { routines: engine.listRoutines(query.botId) } }),
+        handler: async ({ query }) => ({
+          status: 200,
+          json: { routines: engine.listRoutines(query.botId), host: process.platform === "darwin" ? "mac" : "server" },
+        }),
       },
       {
         method: "GET",
@@ -219,6 +232,8 @@ export const init = async (kernel: Kernel): Promise<void> => {
           if (typeof args.timezone === "string") patch.timezone = args.timezone
           if (typeof args.enabled === "boolean") patch.enabled = args.enabled
           if (args.continuity !== undefined) patch.continuity = continuityField(args.continuity)
+          if (args.resultsThreadId === null || typeof args.resultsThreadId === "string")
+            patch.resultsThreadId = args.resultsThreadId
           if (args.timeoutMinutes !== undefined) patch.timeoutMinutes = numberField(args, "timeoutMinutes", 30)
           if (args.overlap !== undefined) patch.overlap = overlapField(args.overlap)
           if (args.catchUpMinutes !== undefined) patch.catchUpMinutes = numberField(args, "catchUpMinutes", 30)
@@ -226,6 +241,14 @@ export const init = async (kernel: Kernel): Promise<void> => {
           return result.success
             ? { status: 200, json: { routine: result.routine } }
             : routeError(result.errorCode, result.error)
+        },
+      },
+      {
+        method: "DELETE",
+        path: "/routines/:id",
+        handler: async ({ params }) => {
+          const result = engine.deleteRoutine(params.id ?? "")
+          return result.success ? { status: 200, json: {} } : routeError(result.errorCode, result.error)
         },
       },
       {
@@ -247,9 +270,40 @@ export const init = async (kernel: Kernel): Promise<void> => {
   const routineCreate: ToolHandler = async ({ ctx, args }) => {
     const input = routineInput({ args: bodyRecord(args), botId: ctx.botId, enabled: false })
     const result = engine.createRoutine({ input, forceDisabled: true })
-    return result.success
-      ? textResult(`Created disabled routine ${result.routine.name}`, result.routine)
-      : toolError(result.errorCode, result.error)
+    if (!result.success) return toolError(result.errorCode, result.error)
+    const routine = result.routine
+    const reviewed = JSON.stringify(routine)
+    const isCurrent = () =>
+      !ctx.signal.aborted &&
+      JSON.stringify(engine.listRoutines(ctx.botId).find((value) => value.id === routine.id)) === reviewed
+    const approval = await kernel.services.use("approvals.present")?.({
+      ctx,
+      scope: { source: "mcp", server: "touri", tool: "routine_create" },
+      toolName: "routine_create",
+      input: {
+        routineId: routine.id,
+        name: routine.name,
+        cron: routine.cron,
+        schedule: describeRoutineSchedule(routine.cron, routine.timezone),
+        timezone: routine.timezone,
+        continuity: routine.continuity,
+        timeoutMinutes: routine.timeoutMinutes,
+        // Bound before JSON serialization: even escaped control characters must
+        // leave room for the complete reviewed target and schedule.
+        promptPreview: routine.prompt.length > 512 ? `${routine.prompt.slice(0, 512)}…` : routine.prompt,
+        promptLength: routine.prompt.length,
+      },
+      allowStanding: false,
+      isCurrent,
+    })
+    if (!approval?.success || approval.behavior !== "allow" || !isCurrent())
+      return textResult(`Routine ${routine.name} remains paused; activation was not approved.`, routine)
+    // Only this explicit user approval can enable the reviewed routine; the tool
+    // update path still rejects enabled=true.
+    const activated = engine.updateRoutine({ routineId: routine.id, patch: { enabled: true }, fromTool: false })
+    return activated.success
+      ? textResult(`Created active routine ${activated.routine.name}`, activated.routine)
+      : toolError(activated.errorCode, activated.error)
   }
   const routineUpdate: ToolHandler = async ({ ctx, args }) => {
     const values = bodyRecord(args)

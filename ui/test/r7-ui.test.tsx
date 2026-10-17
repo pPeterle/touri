@@ -111,6 +111,8 @@ it("renders structured Markdown in the Preview mini-chat with the main chat rend
   if (thread) thread.activeLeafId = saved.id
   render(<App kernel={{ services: { api } }} />)
   await screen.findByRole("textbox", { name: "Mensagem para mark" })
+  if (!screen.queryByRole("button", { name: "Preview do projeto" }))
+    fireEvent.click(screen.getByRole("button", { name: "Painel do bot" }))
   fireEvent.click(screen.getByRole("button", { name: "Preview do projeto" }))
   const feed = document.querySelector(".preview-chat-feed") as HTMLElement
   expect(await within(feed).findByRole("heading", { name: "Resultado" })).toBeVisible()
@@ -128,10 +130,11 @@ it("uses a pt-BR preferences title and separate labels for the shortcut and brow
   fireEvent.click(screen.getByRole("button", { name: /Você Local/ }))
   const settings = screen.getByRole("dialog", { name: "Configurações" })
   expect(within(settings).getByText("preferências locais")).toBeVisible()
-  fireEvent.click(within(settings).getByRole("tab", { name: "Atalhos" }))
+  fireEvent.click(within(settings).getByText("Chat, barra lateral e atalhos"))
   const shortcut = within(settings).getByText("Atalho para controle do computador:")
   expect(shortcut).toBeVisible()
   fireEvent.click(within(settings).getByRole("tab", { name: "Privacidade" }))
+  fireEvent.click(within(settings).getByText("Dados, permissões e conexões"))
   const browser = within(settings).getByText("Navegador:")
   expect(browser).toBeVisible()
   expect(shortcut.nextElementSibling?.tagName).toBe("CODE")
@@ -141,9 +144,9 @@ it("uses a pt-BR preferences title and separate labels for the shortcut and brow
 
 describe("R7: orientação de primeira mensagem", () => {
   it.each([
-    ["QA de aplicativos", /Sugira um plano de testes/],
-    ["Gerente de produto", /Transforme esta ideia em critérios de aceite/],
-    [null, /Explique como você pode me ajudar/],
+    ["QA de aplicativos", /Usar exemplo/],
+    ["Gerente de produto", /Usar exemplo/],
+    [null, /Usar exemplo/],
   ])("offers relevant prompts for %s and fills the composer without sending", async (roleLine, example) => {
     const api = createMockApi()
     await api.request("PATCH /bots/:id", { roleLine, description: null }, { id: "bot-mark" })
@@ -157,7 +160,7 @@ describe("R7: orientação de primeira mensagem", () => {
     const prompt = within(hint).getByRole("button", { name: example })
     fireEvent.click(prompt)
     const composer = screen.getByRole("textbox", { name: "Mensagem para mark" })
-    expect(composer).toHaveValue(prompt.textContent)
+    expect((composer as HTMLTextAreaElement).value).toContain("Comprar café; revisar orçamento; marcar reunião.")
     expect(composer).toHaveFocus()
     expect(api.calls.some((call) => call.route === "POST /threads/:id/messages")).toBe(false)
     fireEvent.keyDown(composer, { key: "Enter" })

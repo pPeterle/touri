@@ -7,7 +7,7 @@
 --     (legacy app uses UUIDs), so a re-import hits the same primary key.
 --   * timestamps are INTEGER milliseconds since epoch (UTC).
 --   * *_json columns hold JSON validated by the types in types.ts.
---   * Only WP2 (store) writes migrations. This file is migration 0001.
+--   * This is a contract snapshot through schema_version 6; runtime migrations are incremental.
 
 CREATE TABLE schema_meta (
   key   TEXT PRIMARY KEY,
@@ -147,7 +147,7 @@ CREATE TABLE messages (
   status       TEXT NOT NULL DEFAULT 'complete' CHECK (status IN ('streaming','complete','failed','canceled')),
   run_id       TEXT REFERENCES runs(id) ON DELETE SET NULL,
   text         TEXT NOT NULL DEFAULT '',           -- plain text for search and handoff
-  parts_json   TEXT NOT NULL DEFAULT '[]',         -- MessagePart[]
+  parts_json   TEXT NOT NULL DEFAULT '[]',         -- MessagePart[]; reasoning may include optional estimatedTokens with empty text
   sender_json  TEXT,                               -- {name, id} for routine / peer / import senders
   source       TEXT NOT NULL DEFAULT 'local' CHECK (source IN ('local','legacy')),
   created_at   INTEGER NOT NULL,

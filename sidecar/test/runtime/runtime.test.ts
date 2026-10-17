@@ -4,6 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, st
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Bot, Message, StoreApi, Thread } from "@touri/contracts"
+import { t } from "../../../ui/src/i18n"
 import { createStandingGrantStore } from "../../src/approvals/grants"
 import { mcpStartupChecks } from "../../src/doctor/mcp"
 import { createKernel } from "../../src/kernel"
@@ -13,6 +14,7 @@ import { createCodexAdapter } from "../../src/runtime/codex/adapter"
 import { createRuntimeEngine } from "../../src/runtime/engine"
 import { MCP_STARTUP_MESSAGE } from "../../src/runtime/mcp-startup"
 import { createRuntimePersistence } from "../../src/runtime/persistence"
+import { createRoutineScheduler } from "../../src/runtime/routines/scheduler"
 import { init as initStore } from "../../src/store"
 import { createTestStore, type TestStore } from "./fake-store"
 
@@ -128,6 +130,7 @@ const fixture = async ({
     homeDir: join(root, "bots", "bot-runtime"),
     mainThreadId: "thread-runtime",
     browserEnabled: true,
+    browser: "touri",
     computerUse: false,
     machine: "local",
     machineIdleMinutes: 15,
@@ -267,6 +270,37 @@ const addUser = (store: StoreApi, thread: Thread, text: string): Message => {
 
 const terminal = (status: string): boolean => ["succeeded", "failed", "canceled", "interrupted"].includes(status)
 
+test("an attached CSV reaches the provider as real rows rather than a filename placeholder", async () => {
+  const f = await fixture()
+  try {
+    const requestLogPath = join(f.assets, "csv-requests.jsonl")
+    writeFileSync(f.scenario, JSON.stringify({ requestLogPath, events: [{ type: "complete" }] }))
+    const path = join(f.runtime.kernel.paths.attachmentsDir, "cadastros.csv")
+    mkdirSync(f.runtime.kernel.paths.attachmentsDir, { recursive: true })
+    const csv = "cadastro,valor\nregistro-a,12\nregistro-b,30\n"
+    writeFileSync(path, csv)
+    ;(f.runtime.kernel.db as Database)
+      .query("INSERT INTO attachments(id,path,mime,bytes,created_at) VALUES (?,?,?,?,1)")
+      .run("table", path, "text/csv", Buffer.byteLength(csv))
+    const request = addUser(f.store, f.thread, "Some os valores dos cadastros anexados.")
+    request.parts.push({ type: "file", attachmentId: "table", mime: "text/csv", name: "cadastros.csv" })
+    const result = f.engine.enqueue({ threadId: f.thread.id, requestMessageId: request.id, trigger: "user" })
+    if (!result.success) throw new Error(result.error)
+    await waitFor(() => terminal(result.run.status))
+    expect(result.run.status).toBe("succeeded")
+    const frames = readFileSync(requestLogPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+    const text = frames.find((frame) => frame.method === "turn/start").params.input[0].text
+    expect(text).toContain(JSON.stringify({ name: "cadastros.csv", content: csv }))
+    expect(text).toContain("do not invent records")
+    expect(text).not.toContain(path)
+  } finally {
+    await closeFixture(f)
+  }
+})
+
 test.each([
   ["codex", "stderr"],
   ["codex", "event"],
@@ -365,6 +399,206 @@ test("an unrelated MCP server failure does not disable touri tools", async () =>
     if (!run.success) throw new Error(run.error)
     await waitFor(() => terminal(f.engine.listRuns(f.thread.id)[0]?.status ?? ""))
     expect(f.engine.listRuns(f.thread.id)[0]?.status).toBe("succeeded")
+  } finally {
+    await closeFixture(f)
+  }
+})
+
+test.each(["claude", "codex"] as const)(
+  "%s reasoning reaches the transcript while the reply is streaming",
+  async (provider) => {
+    const thinking = (index: number, text: string) =>
+      provider === "claude"
+        ? {
+            type: "stream_event",
+            event: { type: "content_block_delta", index, delta: { type: "thinking_delta", thinking: text } },
+          }
+        : { method: "item/reasoning/summaryTextDelta", params: { itemId: `reason-${index}`, delta: text } }
+    const f = await fixture({
+      provider,
+      scenario: {
+        slowMs: 50,
+        events: [
+          thinking(0, "Conferi a fila. "),
+          thinking(0, "Verificando o lock."),
+          provider === "claude"
+            ? { type: "tool", callId: "read", name: "Read", input: { file_path: "/project/payout.ts" } }
+            : {
+                method: "item/started",
+                params: {
+                  item: {
+                    type: "mcpToolCall",
+                    id: "read",
+                    tool: "Read",
+                    arguments: { file_path: "/project/payout.ts" },
+                  },
+                },
+              },
+          thinking(2, "Conferindo "),
+          thinking(2, "o resultado."),
+          { type: "delta", delta: "Pronto." },
+          { type: "complete" },
+        ],
+      },
+    })
+    try {
+      await initStore(f.runtime.kernel)
+      const store = f.runtime.kernel.services.use("store.api")
+      if (!store) throw new Error("Store missing")
+      const snapshots: Message[] = []
+      const append = store.appendDelta
+      store.appendDelta = (args) => {
+        append(args)
+        const reply = store.activePath({ threadId: f.thread.id }).find((item) => item.id === args.messageId)
+        if (reply?.parts[args.partIndex]?.type === "reasoning") snapshots.push(structuredClone(reply))
+      }
+      const queued = f.engine.enqueue({
+        threadId: f.thread.id,
+        requestMessageId: addUser(store, f.thread, "Confira a fila.").id,
+        trigger: "user",
+      })
+      if (!queued.success) throw new Error(queued.error)
+      await waitFor(() => terminal(queued.run.status))
+      expect(queued.run.status).toBe("succeeded")
+      expect(snapshots.length).toBeGreaterThanOrEqual(2)
+      expect(snapshots.every((reply) => reply.status === "streaming" && reply.text === "")).toBe(true)
+      const reply = store.activePath({ threadId: f.thread.id }).find((item) => item.role === "assistant")
+      expect(reply?.parts.filter((part) => part.type === "reasoning")).toEqual([
+        { type: "reasoning", text: "Conferi a fila. Verificando o lock." },
+        { type: "reasoning", text: "Conferindo o resultado." },
+      ])
+      expect(reply?.text).toBe("Pronto.")
+      const deltas = (f.runtime.kernel.db as Database)
+        .query(
+          "SELECT event_json FROM transcript_entries WHERE json_extract(event_json, '$.partType') = 'reasoning' ORDER BY id",
+        )
+        .all() as { event_json: string }[]
+      expect(deltas.length).toBeGreaterThanOrEqual(2)
+    } finally {
+      await closeFixture(f)
+    }
+  },
+)
+
+test("Claude hidden thinking estimates reach live message snapshots without inventing reasoning text", async () => {
+  const thinking = (estimated_tokens: number) => ({
+    type: "stream_event",
+    event: {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "thinking_delta", thinking: "", signature: "opaque-signature", estimated_tokens },
+    },
+  })
+  const f = await fixture({
+    provider: "claude",
+    scenario: {
+      slowMs: 25,
+      events: [thinking(120), thinking(230), { type: "delta", delta: "Pronto." }, { type: "complete" }],
+    },
+  })
+  const snapshots: Message[] = []
+  const unsubscribe = f.runtime.kernel.subscribe(({ event }) => {
+    if ((event.type === "message.created" || event.type === "message.updated") && event.message.role === "assistant")
+      snapshots.push(event.message)
+  })
+  try {
+    await initStore(f.runtime.kernel)
+    const store = f.runtime.kernel.services.use("store.api")
+    if (!store) throw new Error("Store missing")
+    const queued = f.engine.enqueue({
+      threadId: f.thread.id,
+      requestMessageId: addUser(store, f.thread, "Confira a fila.").id,
+      trigger: "user",
+    })
+    if (!queued.success) throw new Error(queued.error)
+    await waitFor(() => terminal(queued.run.status))
+    expect(queued.run.status).toBe("succeeded")
+    const live = snapshots.filter((message) => message.status === "streaming")
+    expect(
+      new Set(
+        live.flatMap((message) =>
+          message.parts.flatMap((part) => (part.type === "reasoning" ? [part.estimatedTokens] : [])),
+        ),
+      ),
+    ).toEqual(new Set([120, 350]))
+    expect(live.every((message) => message.text === "")).toBe(true)
+    const reply = store.activePath({ threadId: f.thread.id }).find((item) => item.role === "assistant")
+    expect(reply?.parts).toEqual([
+      { type: "reasoning", text: "", estimatedTokens: 350 },
+      { type: "text", text: "Pronto." },
+    ])
+    expect(reply?.text).toBe("Pronto.")
+    const rows = (f.runtime.kernel.db as Database).query("SELECT event_json FROM transcript_entries").all()
+    expect(JSON.stringify(rows)).not.toContain("opaque-signature")
+  } finally {
+    unsubscribe()
+    await closeFixture(f)
+  }
+})
+
+test("interleaved text and reasoning keep transcript snapshots and delta offsets intact", async () => {
+  const f = await fixture({
+    scenario: {
+      events: [
+        { method: "item/agentMessage/delta", params: { itemId: "intro", delta: "Vou " } },
+        { method: "item/agentMessage/delta", params: { itemId: "intro", delta: "conferir." } },
+        { type: "reasoning_delta", delta: "Conferindo " },
+        { type: "reasoning_delta", delta: "a fila." },
+        { method: "item/agentMessage/delta", params: { itemId: "reply", delta: "Pronto" } },
+        { method: "item/agentMessage/delta", params: { itemId: "reply", delta: "." } },
+        { type: "complete" },
+      ],
+    },
+  })
+  try {
+    await initStore(f.runtime.kernel)
+    const store = f.runtime.kernel.services.use("store.api")
+    if (!store) throw new Error("Store missing")
+    const snapshots: Message[] = []
+    const append = store.appendDelta
+    store.appendDelta = (args) => {
+      append(args)
+      const reply = store.activePath({ threadId: f.thread.id }).find((message) => message.id === args.messageId)
+      if (reply) snapshots.push(reply)
+    }
+    const queued = f.engine.enqueue({
+      threadId: f.thread.id,
+      requestMessageId: addUser(store, f.thread, "Confira a fila.").id,
+      trigger: "user",
+    })
+    if (!queued.success) throw new Error(queued.error)
+    await waitFor(() => terminal(queued.run.status))
+    expect(queued.run.status).toBe("succeeded")
+    expect(snapshots.map((message) => message.text)).toEqual([
+      "Vou ",
+      "Vou conferir.",
+      "Vou conferir.",
+      "Vou conferir.\n\nPronto",
+      "Vou conferir.\n\nPronto.",
+    ])
+    const reply = store.activePath({ threadId: f.thread.id }).find((message) => message.role === "assistant")
+    expect(reply?.parts).toEqual([
+      { type: "text", text: "Vou conferir." },
+      { type: "reasoning", text: "Conferindo a fila." },
+      { type: "text", text: "\n\nPronto." },
+    ])
+    const rows = (f.runtime.kernel.db as Database)
+      .query(
+        "SELECT event_json FROM transcript_entries WHERE json_extract(event_json, '$.type') = 'message.delta' ORDER BY id",
+      )
+      .all() as { event_json: string }[]
+    expect(
+      rows.map((row) => {
+        const event = JSON.parse(row.event_json)
+        return [event.partIndex, event.offset, event.delta]
+      }),
+    ).toEqual([
+      [0, 0, "Vou "],
+      [0, 4, "conferir."],
+      [1, 11, "a fila."],
+      [2, 0, "\n\nPronto"],
+      [2, 8, "."],
+    ])
   } finally {
     await closeFixture(f)
   }
@@ -527,7 +761,8 @@ test.serial("streaming preserves deltas, command parts, completion and usage", a
     expect(queued.run.status).toBe("succeeded")
     const assistant = [...value.store.messages.values()].find((message) => message.role === "assistant")
     expect(assistant?.status).toBe("complete")
-    expect(assistant?.text).toBe("hello")
+    // The fixture ends on a command with no closing text, so the turn gets a confirmed conclusion.
+    expect(assistant?.text).toBe("hello\n\nDone.")
     expect(assistant?.parts.some((part) => part.type === "command")).toBe(true)
     expect(queued.run.usage?.inputTokens).toBe(3)
     expect(queued.run.usage?.outputTokens).toBe(4)
@@ -657,6 +892,125 @@ test.serial("a provider that ignores interrupt is killed after the cancellation 
     await closeFixture(value)
   }
 })
+
+test.each(["codex", "claude"] as const)(
+  "%s cancellation interrupts first and preserves history within the default two-second grace period",
+  async (provider) => {
+    const value = await fixture({ provider })
+    const requestLogPath = join(value.assets, "requests.jsonl")
+    const signalLogPath = join(value.assets, "signal.log")
+    writeFileSync(
+      value.scenario,
+      JSON.stringify({
+        ignoreInterrupt: true,
+        slowMs: 30_000,
+        deltas: ["partial reply", "still working"],
+        requestLogPath,
+        signalLogPath,
+      }),
+    )
+    try {
+      const request = addUser(value.store, value.thread, "stop a busy provider")
+      const result = value.engine.enqueue({ threadId: value.thread.id, requestMessageId: request.id, trigger: "user" })
+      if (!result.success) throw new Error(result.error)
+      const run = result.run
+      await waitFor(() =>
+        value.store.activePath({ threadId: value.thread.id }).some((message) => message.text === "partial reply"),
+      )
+      const started = performance.now()
+      value.engine.cancel(run.id)
+      await waitFor(() => terminal(run.status), 2_500)
+      expect(performance.now() - started).toBeLessThan(2_500)
+      expect(run).toMatchObject({ status: "canceled", errorClass: "canceled" })
+      const history = value.store.activePath({ threadId: value.thread.id })
+      expect(history).toContainEqual(expect.objectContaining({ id: request.id, text: request.text }))
+      expect(history.find((message) => message.runId === run.id)).toMatchObject({
+        status: "canceled",
+        text: "partial reply",
+        parts: expect.arrayContaining([
+          { type: "notice", code: "run_canceled", level: "info", text: "Cancelado por você" },
+        ]),
+      })
+      if (provider === "codex") {
+        const requests = readFileSync(requestLogPath, "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line))
+        expect(requests.find((request) => request.method === "turn/interrupt")).toMatchObject({
+          id: expect.any(Number),
+          params: { threadId: "fake-codex-session", turnId: "fake-turn-1" },
+        })
+      } else expect(readFileSync(signalLogPath, "utf8")).toBe("SIGINT")
+    } finally {
+      await closeFixture(value)
+    }
+  },
+)
+
+test.each(["interrupt", "completion"] as const)(
+  "cancellation kills a tool holding stderr open after provider %s and releases the queue",
+  async (exit) => {
+    const value = await fixture({ interruptGraceMs: 100 })
+    let providerExited = false
+    const spawn = value.runtime.kernel.spawnTree
+    value.runtime.kernel.spawnTree = (args) => {
+      const child = spawn(args)
+      if (child.success && args.args.includes("app-server"))
+        void child.exited.then(() => {
+          providerExited = true
+        })
+      return child
+    }
+    const toolPidPath = join(value.assets, "tool.pid")
+    writeFileSync(
+      value.scenario,
+      JSON.stringify({
+        exitOnInterrupt: true,
+        toolPidPath,
+        slowMs: exit === "completion" ? 0 : 30_000,
+        deltas: ["partial reply"],
+      }),
+    )
+    let toolPid: number | undefined
+    try {
+      const result = value.engine.enqueue({
+        threadId: value.thread.id,
+        requestMessageId: addUser(value.store, value.thread, "start a tool").id,
+        trigger: "user",
+      })
+      if (!result.success) throw new Error(result.error)
+      await waitFor(() => existsSync(toolPidPath))
+      const pid = Number(readFileSync(toolPidPath, "utf8"))
+      toolPid = pid
+      if (exit === "completion") await waitFor(() => providerExited)
+      value.engine.cancel(result.run.id)
+      writeFileSync(value.scenario, JSON.stringify({ deltas: ["next reply"] }))
+      const next = value.engine.enqueue({
+        threadId: value.thread.id,
+        requestMessageId: addUser(value.store, value.thread, "next task").id,
+        trigger: "user",
+      })
+      if (!next.success) throw new Error(next.error)
+      expect(next.run.status).toBe("queued")
+      await waitFor(() => terminal(result.run.status), 500)
+      expect(result.run.status).toBe("canceled")
+      await waitFor(() => terminal(next.run.status), 2_000)
+      expect(next.run.status).toBe("succeeded")
+      if (process.platform === "linux") {
+        const path = `/proc/${pid}/stat`
+        const stat = existsSync(path) ? readFileSync(path, "utf8") : null
+        expect(stat === null || /^[ZX]/.test(stat.slice(stat.lastIndexOf(")") + 2))).toBe(true)
+      } else expect(() => process.kill(pid, 0)).toThrow()
+    } finally {
+      if (toolPid) {
+        try {
+          process.kill(toolPid, "SIGKILL")
+        } catch {}
+      }
+      await closeFixture(value)
+    }
+  },
+)
 
 test.serial("Codex approval requests create a pending ApprovalPart and receive the decision", async () => {
   const value = await fixture({
@@ -1078,6 +1432,7 @@ test.serial(
       })
       if (!enabled.success) throw new Error(enabled.error)
       const at = Date.UTC(2026, 9, 12, 14, 0)
+      value.engine.updateRoutine({ routineId: enabled.routine.id, patch: { nextRunAt: at }, fromTool: false })
       await Promise.all([value.engine.tick(at), secondEngine.tick(at)])
       const db = value.runtime.kernel.db as Database
       await waitFor(
@@ -1955,6 +2310,7 @@ test.serial("transcript: a late tool start during cancellation remains resolved"
 
 test.serial("transcript: cancellation during environment loading never launches the queued turn", async () => {
   const value = await fixture()
+  await value.engine.ready
   let release: (environment: Record<string, string>) => void = () => undefined
   const environment = new Promise<Record<string, string>>((resolve) => {
     release = resolve
@@ -1964,7 +2320,7 @@ test.serial("transcript: cancellation during environment loading never launches 
     const request = addUser(value.store, value.thread, "cancel before launch")
     const queued = value.engine.enqueue({ threadId: value.thread.id, requestMessageId: request.id, trigger: "user" })
     if (!queued.success) throw new Error(queued.error)
-    await Promise.resolve()
+    await waitFor(() => value.engine.activeRun({ threadId: value.thread.id })?.id === queued.run.id)
     expect(value.engine.activeRun({ threadId: value.thread.id })?.id).toBe(queued.run.id)
     value.engine.cancel(queued.run.id)
     release({ PATH: process.env.PATH ?? "" })
@@ -2008,5 +2364,310 @@ test.serial("a local bot with a provider profile runs the CLI with that profile 
     expect(homes.at(-1)).toBe(join(value.runtime.kernel.paths.appData, "provider-profiles", "clav", "claude"))
   } finally {
     await closeFixture(value)
+  }
+})
+
+test("retry acknowledgements identify one persisted attempt, including after the attempt finishes", async () => {
+  const f = await fixture({ scenario: { crashAt: 1, events: [{ type: "delta", delta: "unused" }] } })
+  try {
+    const request = addUser(f.store, f.thread, "Mensagem salva")
+    const initial = f.engine.enqueue({ threadId: f.thread.id, requestMessageId: request.id, trigger: "user" })
+    if (!initial.success) throw new Error(initial.error)
+    await waitFor(() => terminal(initial.run.status))
+    const retry = f.engine.retry(initial.run.id)
+    if (!retry.success) throw new Error(retry.error)
+    expect(f.engine.retry(initial.run.id)).toMatchObject({ success: true, run: { id: retry.run.id } })
+    await waitFor(() => terminal(retry.run.status))
+    expect(f.engine.retry(initial.run.id)).toMatchObject({ success: true, run: { id: retry.run.id } })
+    expect(f.engine.listRuns(f.thread.id)).toHaveLength(2)
+    expect([...f.store.messages.values()].filter((message) => message.role === "user")).toHaveLength(1)
+  } finally {
+    await closeFixture(f)
+  }
+})
+
+test("a crash after a recorded write waits for review and never repeats the write", async () => {
+  const f = await fixture({
+    scenario: {
+      crashAt: 2,
+      events: [{ type: "command", command: "save notes.md", output: "saved" }, { type: "complete" }],
+    },
+  })
+  const destination = join(f.assets, "notes.md")
+  // The simulated provider commits a real write before emitting its tool acknowledgement.
+  const wrapper = readFileSync(f.fakePath, "utf8")
+  writeFileSync(
+    f.fakePath,
+    wrapper.replace("exec ", `if [ "$1" != "--version" ]; then printf 'saved\\n' >> '${destination}'; fi\nexec `),
+  )
+  try {
+    const request = addUser(f.store, f.thread, "Salve minhas notas")
+    const result = f.engine.enqueue({ threadId: f.thread.id, requestMessageId: request.id, trigger: "user" })
+    if (!result.success) throw new Error(result.error)
+    await waitFor(() => terminal(result.run.status))
+    await Bun.sleep(250)
+    expect(f.engine.retry(result.run.id)).toMatchObject({ success: false, errorCode: "CONFLICT" })
+    expect(f.engine.listRuns(f.thread.id)).toHaveLength(1)
+    expect(readFileSync(destination, "utf8")).toBe("saved\n")
+    expect(f.store.activePath({ threadId: f.thread.id }).flatMap((message) => message.parts)).toContainEqual(
+      expect.objectContaining({ type: "command", exitCode: 0 }),
+    )
+  } finally {
+    await closeFixture(f)
+  }
+})
+
+test.serial("server routines run without browser clients and persist downtime and catch-up history", async () => {
+  const value = await fixture({
+    scenario: { events: [{ type: "delta", delta: "Notas organizadas" }, { type: "complete" }] },
+  })
+  try {
+    const created = value.engine.createRoutine({
+      input: {
+        botId: value.bot.id,
+        name: "Organizar notas",
+        prompt: "Organize minhas notas",
+        cron: "0 9 * * 1-5",
+        timezone: "America/Sao_Paulo",
+        enabled: true,
+        continuity: "results-thread",
+        resultsThreadId: value.thread.id,
+        timeoutMinutes: 30,
+        overlap: "skip",
+        catchUpMinutes: 30,
+      },
+      forceDisabled: false,
+    })
+    if (!created.success) throw new Error(created.error)
+    const due = Date.parse("2026-10-19T12:00:00Z")
+    value.engine.updateRoutine({ routineId: created.routine.id, patch: { nextRunAt: due }, fromTool: false })
+    // No browser or UI is connected to this host. Its scheduler still executes.
+    const scheduler = createRoutineScheduler({ kernel: value.runtime.kernel, engine: value.engine, intervalMs: 10 })
+    const liveDue = Math.floor(Date.now() / 60_000) * 60_000
+    value.engine.updateRoutine({ routineId: created.routine.id, patch: { nextRunAt: liveDue }, fromTool: false })
+    try {
+      await waitFor(() => value.engine.listRoutineRuns(created.routine.id)[0]?.status === "succeeded")
+    } finally {
+      scheduler.stop()
+    }
+    value.engine.updateRoutine({ routineId: created.routine.id, patch: { nextRunAt: due }, fromTool: false })
+    await value.engine.tick(due + 5 * 60_000)
+    await waitFor(() => value.engine.listRoutineRuns(created.routine.id)[0]?.status === "succeeded")
+    expect(value.engine.listRoutineRuns(created.routine.id)[0]).toMatchObject({
+      triggerSource: "catch-up",
+      threadId: value.thread.id,
+      scheduledFor: due,
+    })
+    const missed = due + 24 * 60 * 60_000
+    value.engine.updateRoutine({ routineId: created.routine.id, patch: { nextRunAt: missed }, fromTool: false })
+    await value.engine.tick(missed + 60 * 60_000)
+    expect(value.engine.listRoutineRuns(created.routine.id)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          status: "skipped",
+          triggerSource: "catch-up",
+          scheduledFor: missed,
+          summary: expect.stringContaining("touri estava fechado"),
+        }),
+      ]),
+    )
+    await value.engine.tick(missed + 60 * 60_000)
+    expect(value.engine.listRoutineRuns(created.routine.id).filter((run) => run.scheduledFor === missed)).toHaveLength(
+      1,
+    )
+  } finally {
+    await closeFixture(value)
+  }
+})
+
+test.serial("editing a routine task or destination pauses it until a new explicit activation", async () => {
+  const value = await fixture()
+  try {
+    const created = value.engine.createRoutine({
+      input: {
+        botId: value.bot.id,
+        name: "Organizar notas",
+        prompt: "Organize minhas notas",
+        cron: "0 9 * * 1-5",
+        timezone: "America/Sao_Paulo",
+        enabled: true,
+        continuity: "main-thread",
+        resultsThreadId: null,
+        timeoutMinutes: 30,
+        overlap: "skip",
+        catchUpMinutes: 30,
+      },
+      forceDisabled: false,
+    })
+    if (!created.success) throw new Error(created.error)
+    for (const patch of [{ prompt: "Organize outras notas" }, { continuity: "new-thread" as const }]) {
+      const edited = value.engine.updateRoutine({
+        routineId: created.routine.id,
+        patch,
+        fromTool: true,
+        botId: value.bot.id,
+      })
+      expect(edited).toMatchObject({ success: true, routine: { enabled: false, nextRunAt: null } })
+      const activated = value.engine.updateRoutine({
+        routineId: created.routine.id,
+        patch: { enabled: true },
+        fromTool: false,
+      })
+      expect(activated).toMatchObject({ success: true, routine: { enabled: true } })
+    }
+  } finally {
+    await closeFixture(value)
+  }
+})
+
+test.serial("newly activated routines wait for a future slot instead of replaying unreviewed past work", async () => {
+  const f = await fixture()
+  try {
+    const before = Date.now()
+    const created = f.engine.createRoutine({
+      forceDisabled: false,
+      input: {
+        botId: f.bot.id,
+        name: "Organizar notas",
+        prompt: "Organize minhas notas",
+        cron: "0 9 * * 1-5",
+        timezone: "America/Sao_Paulo",
+        enabled: true,
+        continuity: "main-thread",
+        resultsThreadId: null,
+        timeoutMinutes: 30,
+        overlap: "skip",
+        catchUpMinutes: 30,
+      },
+    })
+    if (!created.success) throw new Error(created.error)
+    expect(created.routine.nextRunAt).toBeGreaterThan(before)
+    await f.engine.tick(before)
+    expect(f.engine.listRoutineRuns(created.routine.id)).toEqual([])
+  } finally {
+    await closeFixture(f)
+  }
+})
+
+const routineForDeletion = (value: Fixture) => {
+  const result = value.engine.createRoutine({
+    input: {
+      botId: value.bot.id,
+      name: "Organizar notas",
+      prompt: "Organize minhas notas",
+      cron: "*/5 * * * *",
+      timezone: "UTC",
+      enabled: true,
+      continuity: "main-thread",
+      resultsThreadId: null,
+      timeoutMinutes: 30,
+      overlap: "queue",
+      catchUpMinutes: 30,
+    },
+    forceDisabled: false,
+  })
+  if (!result.success) throw new Error(result.error)
+  return result.routine
+}
+
+test.serial("deleting a running routine lets its turn finish and preserves conversation and run history", async () => {
+  const value = await fixture({
+    scenario: { slowMs: 100, events: [{ type: "delta", delta: "Notas organizadas" }, { type: "complete" }] },
+  })
+  try {
+    const routine = routineForDeletion(value)
+    const started = value.engine.runRoutine({ routineId: routine.id, triggerSource: "manual" })
+    if (!started.success || !started.routineRun.runId) throw new Error("Missing run")
+    const runId = started.routineRun.runId
+    await waitFor(() =>
+      value.engine.listRuns(value.thread.id).some((run) => run.id === runId && run.status === "running"),
+    )
+    expect(value.engine.deleteRoutine(routine.id).success).toBe(true)
+    expect(value.engine.listRoutines()).toEqual([])
+    await waitFor(() =>
+      value.engine.listRuns(value.thread.id).some((run) => run.id === runId && run.status === "succeeded"),
+    )
+    expect(
+      value.store
+        .activePath({ threadId: value.thread.id })
+        .some((message) => message.text.includes("Notas organizadas")),
+    ).toBe(true)
+    const persistence = createRuntimePersistence({ database: value.runtime.kernel.db })
+    expect(persistence.getRun(runId)?.status).toBe("succeeded")
+    expect(persistence.getRoutine(routine.id)).toBeNull()
+    expect((value.runtime.kernel.db as Database).query("PRAGMA foreign_key_check").all()).toEqual([])
+  } finally {
+    await closeFixture(value)
+  }
+})
+
+test.serial("deletion drops queued catch-up work and a cached due schedule stays deleted after reopening", async () => {
+  const value = await fixture({ maxConcurrentRuns: 0 })
+  let reopened: ReturnType<typeof createKernel> | undefined
+  let replacement: ReturnType<typeof createRuntimeEngine> | undefined
+  try {
+    const routine = routineForDeletion(value)
+    const due = Date.now() - 120_000
+    value.engine.updateRoutine({ routineId: routine.id, patch: { nextRunAt: due }, fromTool: false })
+    await value.engine.tick()
+    const queuedRun = value.engine.listRuns(value.thread.id)[0]
+    expect(queuedRun?.status).toBe("queued")
+    expect(value.engine.listRoutineRuns(routine.id)[0]?.triggerSource).toBe("catch-up")
+    // Populate both caches before deletion, then verify a later tick cannot revive it.
+    value.engine.listRoutines()
+    value.engine.listRoutineRuns(routine.id)
+    expect(value.engine.deleteRoutine(routine.id).success).toBe(true)
+    expect(value.engine.listRuns(value.thread.id)[0]?.status).toBe("canceled")
+    await value.engine.tick(Date.now() + 600_000)
+    expect(value.engine.listRuns(value.thread.id)).toHaveLength(1)
+    expect(value.engine.listRoutineRuns(routine.id)).toEqual([])
+    expect(value.engine.runRoutine({ routineId: routine.id, triggerSource: "manual" }).success).toBe(false)
+    await value.engine.shutdown()
+    reopened = createKernel({ appData: value.root })
+    reopened.kernel.services.provide("store.api", value.store)
+    replacement = createRuntimeEngine({ kernel: reopened.kernel, codexCommand: value.fakePath })
+    await replacement.tick(Date.now() + 900_000)
+    expect(replacement.listRoutines()).toEqual([])
+    expect(replacement.listRuns(value.thread.id)).toHaveLength(1)
+    expect(replacement.listRuns(value.thread.id)[0]?.status).toBe("canceled")
+  } finally {
+    await replacement?.shutdown()
+    reopened?.stop()
+    await closeFixture(value)
+  }
+})
+
+runtimeTest.serial("first notes example completes in Portuguese without a connected project or folder", async () => {
+  const response = "- Comprar café\n- Revisar orçamento\n- Marcar reunião"
+  const f = await fixture({ scenario: { events: [{ type: "delta", delta: response }, { type: "complete" }] } })
+  const requestLogPath = join(f.assets, "requests.jsonl")
+  try {
+    f.bot.cwd = null
+    f.bot.folders = []
+    ;(f.runtime.kernel.db as Database).query("UPDATE bots SET cwd=NULL WHERE id=?").run(f.bot.id)
+    writeFileSync(
+      f.scenario,
+      JSON.stringify({ requestLogPath, events: [{ type: "delta", delta: response }, { type: "complete" }] }),
+    )
+    const prompt = t("onboarding.examplePrompt")
+    const request = addUser(f.store, f.thread, prompt)
+    const queued = f.engine.enqueue({ threadId: f.thread.id, requestMessageId: request.id, trigger: "user" })
+    if (!queued.success) throw new Error(queued.error)
+    await waitFor(() => terminal(queued.run.status))
+    expect(queued.run.status).toBe("succeeded")
+    expect(f.bot.projectId).toBeNull()
+    expect(f.bot.folders).toEqual([])
+    const replies = f.store.activePath({ threadId: f.thread.id }).filter((item) => item.role === "assistant")
+    expect(replies.at(-1)?.text).toBe(response)
+    const requests = readFileSync(requestLogPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+    const starts = requests.filter((item) => item.method === "turn/start")
+    expect(starts).toHaveLength(1)
+    expect(JSON.stringify(starts[0])).toContain("lista em português do Brasil")
+    expect(JSON.stringify(starts[0])).toContain("Comprar café; revisar orçamento; marcar reunião.")
+  } finally {
+    await closeFixture(f)
   }
 })

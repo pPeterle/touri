@@ -1,24 +1,33 @@
-import type {
-  Bot,
-  BotGroup,
-  Id,
-  MachineState,
-  Message,
-  Project,
-  Routine,
-  RoutineRun,
-  Run,
-  Thread,
-} from "@touri/contracts"
-import { Fragment, type ReactNode, useContext, useLayoutEffect, useMemo, useRef, useState } from "react"
+import type { Bot, BotGroup, Id, MachineState, Message, Routine, RoutineRun, Run, Thread } from "@touri/contracts"
+import { failureRetryHint, sanitizeDiagnostic } from "@touri/contracts/run-failure"
+import {
+  Fragment,
+  type ReactNode,
+  useContext,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react"
 import type { UiApi } from "../api/client"
 import type { ApprovalFocus } from "../approvalNavigation"
+import { useComposerDraft } from "../composerDraft"
 import { userFacingRunError } from "../errors"
 import { ComputerGrantCard } from "../features/computer"
 import { InlineLivePreview, InlinePreviewContext, screenTool } from "../features/desktop/InlineLivePreview"
 import { localizeNotice, t, threadTitle } from "../i18n"
 import { machineStateForDisplay } from "../machineState"
 import { messageMarkdown } from "../messageMarkdown"
+import {
+  consumeTaskResume,
+  consumeTaskReview,
+  requestTaskResume,
+  resumeTaskEvent,
+  reviewTaskEvent,
+} from "../recoveryEvents"
+import { type RoutineDraft, repeatTaskDraft, suggestedRoutineDraft } from "../routineDraft"
 import { failureTimeLabel, runErrorFor } from "../runError"
 import { ActivityMark } from "./ActivityMark"
 import { useAvatarBot, useMascotSnapshot, useMessageMascotState, useThreadBot } from "./AvatarRuntime"
@@ -26,20 +35,26 @@ import { withApprovalAnswers } from "./activityStatus"
 import { BotAvatar } from "./BotAvatar"
 import { ChatDisclosure } from "./ChatDisclosure"
 import { Composer } from "./Composer"
+import { ConnectDataCard, connectDataMarker } from "./ConnectDataCard"
 import { ConversationStart } from "./ConversationStart"
+import { ErrorDetails, ErrorText } from "./ErrorDetails"
+import { ErrorNotice } from "./ErrorNotice"
 import { EvidenceContext } from "./EvidenceGallery"
 import { FailureActionContext } from "./FailureActionContext"
-import { GroupHeader } from "./Groups"
+import { GroupConversationStart, GroupHeader } from "./Groups"
 import { MachineServiceButton } from "./MachineServiceButton"
 import { MachineStatus } from "./MachineStatus"
 import { MarkdownContent } from "./MarkdownContent"
+import { MessageAttachments } from "./MessageAttachments"
 import { useInsertedIds } from "./Motion"
 import { mascotSignalFor } from "./mascotState"
 import { ToolCallList } from "./ToolCallList"
 import { ToolText } from "./ToolOutput"
 import { toolStatus } from "./toolPresentation"
+import { type EditMessage, UserMessageEdit } from "./UserMessageEdit"
 
 type ChatPanelProps = {
+  onRepeatTask?: ((draft: RoutineDraft) => void) | undefined
   group?: BotGroup | null
   groupMembers?: Bot[]
   onEditGroup?: () => void
@@ -48,12 +63,10 @@ type ChatPanelProps = {
   onTogglePanel?: () => void
   routines?: Array<Routine>
   routineRuns?: Array<RoutineRun>
+  attachmentButtonRef?: React.RefObject<HTMLButtonElement | null> | undefined
   onOpenPermissions?: () => void
+  onOpenToolCatalog?: () => void
   onOpenProviderLogin?: () => void
-  onOpenModel?: () => void
-  projects?: Project[]
-  onSelectProject?: (projectId: Id | null) => Promise<void>
-  onAddProject?: () => void
   onOpenComputer?: () => void
   thread: Thread | null
   bot: Bot | null
@@ -79,6 +92,9 @@ type VirtualMessageListProps = {
   runs?: Array<Run>
   onSwitchBranch: (message: Message, siblings: Array<Message>, index: number) => void
   onRetry: (runId: Id) => Promise<void>
+  onEdit?: EditMessage | undefined
+  onCancel?: ((runId: Id) => Promise<void>) | undefined
+  editDisabled?: boolean
   header?: ReactNode
   allMessages?: Array<Message>
   timelineCards?: Array<{ id: string; createdAt: number; content: ReactNode }>
@@ -102,7 +118,7 @@ export const activeMessagePath = (messages: Array<Message>, leafId: Id | null): 
 
 const deliveryLabels = {
   queued: "Na fila · aguardando conexão",
-  sent: "Enviada · aguardando confirmação",
+  sent: t("Sending message…"),
   acked: "Entregue",
   failed: "Falha na entrega",
 }
@@ -124,6 +140,9 @@ export const VirtualMessageList = ({
   allMessages = messages,
   onSwitchBranch,
   onRetry,
+  onEdit,
+  onCancel,
+  editDisabled = false,
   header,
   timelineCards = [],
 }: VirtualMessageListProps) => {
@@ -295,7 +314,11 @@ export const VirtualMessageList = ({
               if (isResumeMarker(saved))
                 return (
                   <p key={saved.id} className="run-resumed-marker" role="note" data-message-id={saved.id}>
-                    <span>{saved.text}</span>
+                    <span>
+                      {saved.text === "Retomado após aprovação de acesso"
+                        ? t("Retomado após aprovação de acesso")
+                        : saved.text}
+                    </span>
                   </p>
                 )
               const run = runs.find((run) => run.id === saved.runId)
@@ -323,6 +346,7 @@ export const VirtualMessageList = ({
                   : saved
               const siblings = allMessages.filter(
                 (candidate) =>
+                  candidate.threadId === message.threadId &&
                   candidate.parentId === message.parentId &&
                   candidate.role === message.role &&
                   candidate.kind !== "notice",
@@ -362,6 +386,9 @@ export const VirtualMessageList = ({
                     branchIndex={branchIndex}
                     onSwitchBranch={onSwitchBranch}
                     onRetry={onRetry}
+                    onEdit={onEdit}
+                    onCancel={onCancel}
+                    editDisabled={editDisabled}
                   />
                 </Fragment>
               )
@@ -446,6 +473,9 @@ const MessageBubble = ({
   branchIndex,
   onSwitchBranch,
   onRetry,
+  onEdit,
+  onCancel,
+  editDisabled,
 }: {
   inserted: boolean
   vmBotId?: string | undefined
@@ -458,6 +488,9 @@ const MessageBubble = ({
   branchIndex: number
   onSwitchBranch: (message: Message, siblings: Array<Message>, index: number) => void
   onRetry: (runId: Id) => Promise<void>
+  onEdit?: EditMessage | undefined
+  onCancel?: ((runId: Id) => Promise<void>) | undefined
+  editDisabled: boolean
 }) => {
   const runtimeState = useMessageMascotState(message, run)
   const threadBot = useThreadBot(message.threadId)
@@ -485,8 +518,14 @@ const MessageBubble = ({
     !parts.some((part) => part.type === "approval" && part.decision === "pending")
       ? mascotSignalFor({ botId: run?.botId ?? "", runs: run ? [run] : [], messages: [{ ...message, parts }] }).state
       : runtimeState
-  const reasoning = message.parts.filter((part) => part.type === "reasoning")
-  const text = messageMarkdown(message)
+  const reasoning = message.parts.filter((part) => part.type === "reasoning" && part.text.trim())
+  const reasoningId = useId()
+  const [reasoningExpanded, setReasoningExpanded] = useState(false)
+  const markdown = messageMarkdown(message)
+  const text = message.role === "assistant" ? markdown.replace(connectDataMarker, "") : markdown
+  const technicalNotice =
+    message.role === "system" &&
+    message.parts.some((part) => part.type === "notice" && part.code === "session_replaced")
   const longContent =
     message.role === "assistant" &&
     message.status !== "streaming" &&
@@ -499,36 +538,109 @@ const MessageBubble = ({
       ? null
       : failure
   const [failureExpanded, setFailureExpanded] = useState(false)
+  const [reviewingActions, setReviewingActions] = useState(false)
+  useEffect(() => {
+    const review = () => {
+      if (!message.runId || !consumeTaskReview(message.runId)) return
+      setReviewingActions(true)
+      root.current?.scrollIntoView?.({ block: "center" })
+    }
+    review()
+    window.addEventListener(reviewTaskEvent, review)
+    return () => window.removeEventListener(reviewTaskEvent, review)
+  }, [message.runId])
   const failedAt = run?.finishedAt ?? message.updatedAt
   const failureTime = failureTimeLabel(failedAt)
   const onFailureAction = useContext(FailureActionContext)
   const failureAction = runError?.action
   const failureContent = runError && (
     <div className="message-error" role="alert">
-      <strong>{runError.title}</strong>
-      <p>
-        {runError.stageLabel} · {runError.detail}
-      </p>
-      <time className="message-error-meta" dateTime={new Date(failedAt).toISOString()}>
-        {failureTime}
-      </time>
-      <small className="message-error-code">{runError.code}</small>
-      {(vmBotId || runError.specificHint) && <p>{runError.hint}</p>}
-      {failureAction && failureAction.kind !== "machine_service" && (
-        <button type="button" className="text-button" onClick={() => onFailureAction(failureAction)}>
-          {failureAction.label}
-        </button>
-      )}
-      {vmBotId &&
-        api &&
-        (runError.action?.kind === "machine_service" ||
-          message.parts.some(
-            (part) => part.type === "notice" && /^machine_service_(?:unavailable|start_failed):/.test(part.text),
-          )) && <MachineServiceButton api={api} botId={vmBotId} />}
-      {message.runId && (!vmBotId || machine?.status === "running") && (
-        <button type="button" className="text-button retry-button" onClick={() => void onRetry(message.runId ?? "")}>
-          {vmBotId ? "Tentar de novo" : t("Tentar novamente")}
-        </button>
+      {runError.recovery.classified ||
+      (runError.stage === "turn" && !/^TOURI-E800[12]$/.test(runError.code)) ||
+      runError.stage === "provider_protocol" ? (
+        <>
+          <ErrorNotice
+            recovery={runError.recovery}
+            onAction={async (action) => {
+              if (action === "retry") await onRetry(message.runId ?? "")
+              else if (action === "review") setReviewingActions(true)
+              else if (action === "resume") {
+                setReviewingActions(true)
+                requestTaskResume(message.threadId)
+              } else
+                onFailureAction(
+                  action === "login"
+                    ? { kind: "setting", settingId: "providerLogin", label: "" }
+                    : { kind: "doctor", label: "" },
+                )
+            }}
+          />
+          {vmBotId && !runError.recovery.classified && <p>{failureRetryHint(runError.stage)}</p>}
+          {reviewingActions && (
+            <section aria-label={t("Ações registradas")} tabIndex={-1}>
+              <p>{t("Revise as ações registradas antes de continuar. Nenhuma ação será repetida automaticamente.")}</p>
+              <ul>
+                {message.parts.flatMap((part, index) => {
+                  const summary =
+                    part.type === "tool_call"
+                      ? part.summary
+                      : part.type === "command"
+                        ? part.command
+                        : part.type === "file_change"
+                          ? part.paths.join(", ")
+                          : null
+                  return summary
+                    ? [
+                        <li key={"callId" in part ? part.callId : part.type}>
+                          <details>
+                            <summary>
+                              {t("Ações registradas")} {index + 1}
+                            </summary>
+                            <pre>{sanitizeDiagnostic(summary)}</pre>
+                          </details>
+                        </li>,
+                      ]
+                    : []
+                })}
+              </ul>
+              {!message.parts.some((part) => ["tool_call", "command", "file_change"].includes(part.type)) && (
+                <p>{t("Nenhuma ação confirmada no histórico. Confira o estado atual antes de continuar.")}</p>
+              )}
+            </section>
+          )}
+        </>
+      ) : (
+        <>
+          <strong>{runError.title}</strong>
+          <p>
+            {runError.stageLabel} · {runError.detail}
+          </p>
+          <time className="message-error-meta" dateTime={new Date(failedAt).toISOString()}>
+            {failureTime}
+          </time>
+          <ErrorDetails code={runError.code} />
+          {(vmBotId || runError.specificHint) && <p>{runError.hint}</p>}
+          {failureAction && failureAction.kind !== "machine_service" && (
+            <button type="button" className="text-button" onClick={() => onFailureAction(failureAction)}>
+              {failureAction.label}
+            </button>
+          )}
+          {vmBotId &&
+            api &&
+            (runError.action?.kind === "machine_service" ||
+              message.parts.some(
+                (part) => part.type === "notice" && /^machine_service_(?:unavailable|start_failed):/.test(part.text),
+              )) && <MachineServiceButton api={api} botId={vmBotId} />}
+          {message.runId && (!vmBotId || machine?.status === "running") && (
+            <button
+              type="button"
+              className="text-button retry-button"
+              onClick={() => void onRetry(message.runId ?? "")}
+            >
+              {vmBotId ? "Tentar de novo" : t("Tentar novamente")}
+            </button>
+          )}
+        </>
       )}
     </div>
   )
@@ -540,7 +652,20 @@ const MessageBubble = ({
       data-motion-insert={inserted}
     >
       <div className="message-meta">
-        {message.role === "assistant" && message.sender && bot && <BotAvatar bot={bot} size={22} state={mascotState} />}
+        {message.role === "assistant" &&
+          message.sender &&
+          (senderBot ? (
+            <BotAvatar bot={senderBot} size={22} state={mascotState} />
+          ) : (
+            <span role="img" aria-label={t("Membro excluído: {name}", { name: message.sender.name })}>
+              <BotAvatar
+                bot={{ id: message.sender.id, color: "#6b7280", avatarShape: "cercle" }}
+                size={22}
+                state="idle"
+                still
+              />
+            </span>
+          ))}
         <span className="message-role">
           {message.role === "user"
             ? t("Você")
@@ -563,12 +688,25 @@ const MessageBubble = ({
         )}
       </div>
       {reasoning.length > 0 && (
-        <ChatDisclosure className="chat-reasoning" label="Raciocínio">
-          <MarkdownContent content={reasoning.map((part) => (part.type === "reasoning" ? part.text : "")).join("")} />
+        <ChatDisclosure
+          key={message.status === "streaming" ? "live" : "saved"}
+          id={reasoningId}
+          className="chat-reasoning"
+          label="Raciocínio"
+          expanded={message.status === "streaming" ? reasoningExpanded : undefined}
+          onExpandedChange={setReasoningExpanded}
+        >
+          <MarkdownContent
+            content={reasoning.map((part) => (part.type === "reasoning" ? part.text : "")).join("\n\n")}
+          />
         </ChatDisclosure>
       )}
       {text &&
-        (message.role === "tool" ? (
+        (technicalNotice ? (
+          <ChatDisclosure label={t("Detalhes técnicos")}>
+            <pre>{text}</pre>
+          </ChatDisclosure>
+        ) : message.role === "tool" ? (
           <ToolText text={text} />
         ) : longContent ? (
           <ChatDisclosure
@@ -585,6 +723,14 @@ const MessageBubble = ({
             evidence={message.role === "assistant" ? evidence : undefined}
           />
         ))}
+      <MessageAttachments parts={parts.filter((part) => part.type === "image" || part.type === "file")} api={api} />
+      {message.role === "user" && onEdit && (
+        <UserMessageEdit
+          message={message}
+          onEdit={onEdit}
+          disabled={editDisabled || message.delivery?.status === "queued" || message.delivery?.status === "sent"}
+        />
+      )}
       <ToolCallList
         parts={parts}
         api={api}
@@ -595,9 +741,17 @@ const MessageBubble = ({
       {message.role === "assistant" && message.status === "streaming" && (
         <ActivityMark
           state={mascotState}
+          run={run}
+          updatedAt={message.updatedAt}
+          api={api}
+          onCancel={onCancel}
+          preparingEnvironment={Boolean(vmBotId)}
           bot={bot}
           threadId={message.threadId}
           parts={parts}
+          reasoningId={reasoningId}
+          reasoningExpanded={reasoningExpanded}
+          onExpandReasoning={() => setReasoningExpanded(true)}
           onFocusApproval={(approvalId) => {
             const card = Array.from(root.current?.querySelectorAll<HTMLElement>("[data-approval-id]") ?? []).find(
               (element) => element.dataset.approvalId === approvalId,
@@ -607,7 +761,11 @@ const MessageBubble = ({
           }}
         />
       )}
-      {parts.some(screenTool) && <InlineLivePreview parts={parts} finished={message.status !== "streaming"} />}
+      {parts.some(screenTool) && (
+        <ChatDisclosure label={t("Advanced computer view")}>
+          <InlineLivePreview parts={parts} finished={message.status !== "streaming"} />
+        </ChatDisclosure>
+      )}
       {siblings.length > 1 && (
         <fieldset className="branch-switcher">
           <legend className="visually-hidden">{t("Message branches")}</legend>
@@ -640,8 +798,8 @@ const MessageBubble = ({
             aria-expanded={failureExpanded}
             onClick={() => setFailureExpanded((expanded) => !expanded)}
           >
-            {runError.title} · {failureTime} · <small>{runError.code}</small> · houve uma resposta depois ·{" "}
-            {failureExpanded ? "Ocultar" : "Ver detalhes"}
+            {runError.title} · {failureTime} · {t("A reply followed this error")} ·{" "}
+            {failureExpanded ? t("Hide error") : t("View error")}
           </button>
           {failureExpanded && failureContent}
         </div>
@@ -653,6 +811,7 @@ const MessageBubble = ({
 }
 
 export const ChatPanel = ({
+  onRepeatTask,
   group = null,
   groupMembers = [],
   onEditGroup = () => {},
@@ -673,19 +832,36 @@ export const ChatPanel = ({
   onComputerGrant,
   onOpenTools,
   onOpenPermissions,
+  attachmentButtonRef: sharedAttachmentButtonRef,
+  onOpenToolCatalog,
   onOpenProviderLogin,
-  onOpenModel,
-  projects,
-  onSelectProject,
-  onAddProject,
   onOpenComputer,
   routines = [],
   routineRuns = [],
 }: ChatPanelProps) => {
   const machine = machineStateForDisplay(rawMachine)
-  const [draft, setDraft] = useState("")
+  const { draft, setDraft, draftSaveFailed } = useComposerDraft(thread?.id)
   const mascotSnapshot = useMascotSnapshot({ id: bot?.id ?? "", color: bot?.color ?? null }, thread?.id)
   const composerRef = useRef<HTMLTextAreaElement>(null)
+  const recoveryThreadId = thread?.id
+  useEffect(() => {
+    const resume = () => {
+      if (!recoveryThreadId || !consumeTaskResume(recoveryThreadId)) return
+      setDraft(
+        (current) =>
+          current ||
+          t(
+            "Conferi as ações registradas. Quero continuar a tarefa a partir do estado atual, sem repetir ações já concluídas.",
+          ),
+      )
+      composerRef.current?.focus()
+    }
+    resume()
+    window.addEventListener(resumeTaskEvent, resume)
+    return () => window.removeEventListener(resumeTaskEvent, resume)
+  }, [recoveryThreadId, setDraft])
+  const localAttachmentButtonRef = useRef<HTMLButtonElement>(null)
+  const attachmentButtonRef = sharedAttachmentButtonRef ?? localAttachmentButtonRef
   const activeRun = useMemo(
     () =>
       runs.find(
@@ -705,12 +881,6 @@ export const ChatPanel = ({
     [runs, thread?.id, serviceRecovered],
   )
 
-  // A draft belongs to one conversation, including when navigating while an upload is pending.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: reset only when the conversation changes
-  useLayoutEffect(() => {
-    setDraft("")
-  }, [thread?.id])
-
   if (!thread)
     return (
       <section className="chat-panel">
@@ -726,7 +896,8 @@ export const ChatPanel = ({
               <button
                 type="button"
                 className="toolbar-icon bot-panel-toggle"
-                aria-label="Painel do bot"
+                aria-label={t("Bot panel")}
+                title={t("Bot advanced")}
                 aria-expanded={panelOpen}
                 aria-controls="bot-panel"
                 onClick={onTogglePanel}
@@ -745,7 +916,7 @@ export const ChatPanel = ({
     )
 
   const visibleMessages = group
-    ? messages.filter((m) => m.threadId === thread.id)
+    ? messages.filter((message) => message.threadId === thread.id)
     : activeMessagePath(
         messages.filter((message) => message.threadId === thread.id),
         thread.activeLeafId,
@@ -759,7 +930,22 @@ export const ChatPanel = ({
     )
       visibleMessages.push(message)
   }
+  const repeatDraft =
+    !group && bot && !activeRun
+      ? (repeatTaskDraft(bot, thread, visibleMessages) ??
+        (visibleMessages.length === 0 ? suggestedRoutineDraft(bot) : null))
+      : null
   const latestReply = [...visibleMessages].reverse().find((message) => message.role === "assistant")
+  const connectDataReply =
+    !group &&
+    bot &&
+    !activeRun &&
+    latestReply?.status === "complete" &&
+    [...visibleMessages].reverse().find((message) => message.role === "user" || message.role === "assistant") ===
+      latestReply &&
+    connectDataMarker.test(messageMarkdown(latestReply))
+      ? latestReply
+      : null
   const activityState =
     mascotSnapshot.state === "idle"
       ? mascotSignalFor({
@@ -788,7 +974,13 @@ export const ChatPanel = ({
   return (
     <section className="chat-panel">
       {group ? (
-        <GroupHeader group={group} bots={groupMembers} onEdit={onEditGroup} />
+        <GroupHeader
+          group={group}
+          bots={groupMembers}
+          onEdit={onEditGroup}
+          panelOpen={panelOpen}
+          onTogglePanel={onTogglePanel}
+        />
       ) : (
         <header className="chat-header" data-tauri-drag-region>
           <span className="chat-header-crumb">Bots / {bot?.name ?? "touri"}</span>
@@ -806,7 +998,8 @@ export const ChatPanel = ({
               <button
                 type="button"
                 className="toolbar-icon bot-panel-toggle"
-                aria-label="Painel do bot"
+                aria-label={t("Bot panel")}
+                title={t("Bot advanced")}
                 aria-expanded={panelOpen}
                 aria-controls="bot-panel"
                 onClick={onTogglePanel}
@@ -814,45 +1007,21 @@ export const ChatPanel = ({
                 ◧
               </button>
             )}
-            <button type="button" className="model-pill" onClick={() => onOpenTools("preview")}>
-              <span>{bot?.provider ?? "codex"}</span>
-              <span className="model-sep" aria-hidden="true">
-                ·
-              </span>
-              <span className="model-name">{bot?.model ?? "padrão"}</span>
-              <span className="toolbar-chevron">⌄</span>
-            </button>
-            <button
-              type="button"
-              className="toolbar-icon"
-              onClick={() => onOpenTools("preview")}
-              aria-label="Preview do projeto"
-            >
-              <svg
-                width="18"
-                height="18"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                aria-hidden="true"
-              >
-                <rect x="3" y="4" width="18" height="13" rx="2" />
-                <path d="M8 21h8M12 17v4" />
-              </svg>
-            </button>
           </div>
         </header>
       )}
-      {!group && bot?.machine === "vm" && machine && (
+      {!group && bot?.machine === "vm" && machine && (activeRun || machine.status === "starting") && (
         <MachineStatus
           key={bot.id}
           machine={machine}
           api={api}
           turnFailed={!activeRun && latestReply?.status === "failed"}
+          activeTurns={runs.some(
+            (run) => run.botId === bot.id && ["queued", "starting", "running"].includes(run.status),
+          )}
         />
       )}
-      {computerGrant && computerGrant.threadId === thread.id && (
+      {computerGrant && computerGrant.threadId === thread.id && activeRun?.botId === computerGrant.botId && (
         <ComputerGrantCard
           api={api}
           botId={computerGrant.botId}
@@ -884,18 +1053,61 @@ export const ChatPanel = ({
             if (next) void onSwitchBranch(thread.id, next.id)
           }}
           onRetry={onRetry}
+          onCancel={onCancel}
+          // Group replies use a flat history, so sibling edits cannot be selected there.
+          onEdit={group ? undefined : onSend}
+          editDisabled={Boolean(activeRun)}
           header={
             visibleMessages.length === 0 && !activeRun && visibleRuns.length === 0 ? (
-              <ConversationStart
-                bot={bot}
-                onChoose={(prompt) => {
-                  setDraft(prompt)
-                  composerRef.current?.focus()
-                }}
-              />
+              group ? (
+                <GroupConversationStart group={group} bots={groupMembers} />
+              ) : (
+                <ConversationStart
+                  bot={bot}
+                  onFolder={onOpenPermissions}
+                  onAttach={() => attachmentButtonRef.current?.click()}
+                  onChoose={(prompt) => {
+                    setDraft(prompt)
+                    composerRef.current?.focus()
+                  }}
+                />
+              )
             ) : null
           }
           timelineCards={[
+            ...(repeatDraft && onRepeatTask && !connectDataReply
+              ? [
+                  {
+                    id: `repeat-${latestReply?.id}`,
+                    createdAt: (latestReply?.createdAt ?? 0) + 2,
+                    content: (
+                      <button
+                        type="button"
+                        className="outline-button repeat-task-button"
+                        onClick={() => onRepeatTask(repeatDraft)}
+                      >
+                        {t("Repetir esta tarefa")}
+                      </button>
+                    ),
+                  },
+                ]
+              : []),
+            ...(connectDataReply && onOpenToolCatalog
+              ? [
+                  {
+                    id: `connect-data-${connectDataReply.id}`,
+                    createdAt: connectDataReply.createdAt + 1,
+                    content: (
+                      <ConnectDataCard
+                        desktop={"__TAURI_INTERNALS__" in window}
+                        onAttach={() => attachmentButtonRef.current?.click()}
+                        onFolder={bot?.machine === "cloud" ? undefined : onOpenPermissions}
+                        onCatalog={onOpenToolCatalog}
+                      />
+                    ),
+                  },
+                ]
+              : []),
             ...(awaitingReply
               ? [
                   {
@@ -904,9 +1116,17 @@ export const ChatPanel = ({
                     content: (
                       <article className="message-bubble message-assistant" data-pending-run={activeRun.id}>
                         <div className="message-meta">
-                          <span className="message-role">touri</span>
+                          <span className="message-role">{bot?.name ?? "touri"}</span>
                         </div>
-                        <ActivityMark state={activityState} bot={bot ?? undefined} threadId={thread.id} />
+                        <ActivityMark
+                          state={activityState === "waiting-approval" ? activityState : "thinking"}
+                          bot={bot ?? undefined}
+                          threadId={thread.id}
+                          run={activeRun}
+                          api={api}
+                          onCancel={onCancel}
+                          preparingEnvironment={bot?.machine === "vm"}
+                        />
                       </article>
                     ),
                   },
@@ -938,6 +1158,9 @@ export const ChatPanel = ({
         />
       </InlinePreviewContext.Provider>
       {/* r8 composer: notices and the input island stay isolated from transcript activity. */}
+      {draftSaveFailed && (
+        <p role="alert">{t("Não foi possível salvar o rascunho. Copie sua mensagem antes de fechar o touri.")}</p>
+      )}
       <Composer
         key={`composer-${thread.id}`}
         notice={{
@@ -957,14 +1180,15 @@ export const ChatPanel = ({
         draft={draft}
         onDraft={setDraft}
         inputRef={composerRef}
+        attachmentButtonRef={attachmentButtonRef}
         activeRun={activeRun}
         queuedCount={visibleMessages.filter((message) => message.delivery?.status === "queued").length}
-        onSend={onSend}
+        onSend={async (...args) => {
+          await onSend(...args)
+          // Sending may finish after navigation has unmounted this conversation's composer.
+          setDraft((current) => (current === draft ? "" : current))
+        }}
         onCancel={onCancel}
-        onOpenModel={group ? undefined : onOpenModel}
-        projects={projects}
-        onSelectProject={onSelectProject}
-        onAddProject={onAddProject}
         onOpenPermissions={group ? undefined : onOpenPermissions}
         onOpenProviderLogin={group ? undefined : onOpenProviderLogin}
       />
@@ -1042,7 +1266,9 @@ const RunCard = ({
           minute: "2-digit",
         })}
       </time>
-      <p>{summary}</p>
+      <div className="run-card-summary">
+        <ErrorText text={summary} />
+      </div>
     </article>
   )
 }

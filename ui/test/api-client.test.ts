@@ -3,6 +3,7 @@ import { expect, test, vi } from "vitest"
 import { apiRouteKeys, createApiClient, resolveSidecarEndpoint, type TauriInvoke } from "../src/api/client"
 
 const contractRouteKeys: Array<keyof ApiRoutes> = [
+  "GET /workspace/activity",
   "GET /groups",
   "POST /groups",
   "PATCH /groups/:id",
@@ -30,6 +31,8 @@ const contractRouteKeys: Array<keyof ApiRoutes> = [
   "PATCH /bots/:id",
   "DELETE /bots/:id",
   "GET /bots/:id/mcp",
+  "GET /bots/:id/mcp/prerequisites",
+  "POST /bots/:id/mcp/test",
   "PUT /bots/:id/mcp/:name",
   "DELETE /bots/:id/mcp/:name",
   "PATCH /bots/:id/mcp/:name/tools/:tool",
@@ -53,6 +56,7 @@ const contractRouteKeys: Array<keyof ApiRoutes> = [
   "POST /bots/:id/machine/intent",
   "POST /bots/:id/machine/reset",
   "POST /bots/:id/desktop",
+  "POST /bots/:id/desktop/return",
   "POST /desktop/:id/text",
   "DELETE /desktop/:id",
   "GET /bots/:id/threads",
@@ -70,11 +74,14 @@ const contractRouteKeys: Array<keyof ApiRoutes> = [
   "GET /routines",
   "POST /routines",
   "PATCH /routines/:id",
+  "DELETE /routines/:id",
   "POST /routines/:id/run",
   "GET /routine-runs",
   "GET /mcp/tools",
   "GET /projects",
   "GET /projects/discover",
+  "GET /folders",
+  "POST /folders",
   "POST /projects",
   "GET /projects/:id/git",
   "GET /projects/:id/secrets",
@@ -272,4 +279,22 @@ test("A07: file chooser uploads send bounded bytes without host paths or an acti
   await api.uploadAttachment?.(new File(["<svg/>"], "test.svg", { type: "image/svg+xml" }))
   const body = JSON.parse(String(fetchImpl.mock.calls[0]?.[1]?.body))
   expect(body).toEqual({ name: "test.svg", dataBase64: btoa("<svg/>") })
+})
+
+test("attachment uploads preserve the server's rejection reason", async () => {
+  const fetchImpl = vi.fn(
+    async () =>
+      new Response(JSON.stringify({ error: "Arquivo acima de 15 MB", errorCode: "ATTACHMENT_TOO_LARGE" }), {
+        status: 413,
+      }),
+  )
+  const api = createApiClient({
+    endpoint: { baseUrl: "http://localhost:1", wsUrl: "ws://localhost:1", token: "test" },
+    fetchImpl,
+  })
+  await expect(api.uploadAttachment?.(new File(["small"], "a.txt"))).rejects.toMatchObject({
+    message: "Arquivo acima de 15 MB",
+    errorCode: "ATTACHMENT_TOO_LARGE",
+    status: 413,
+  })
 })

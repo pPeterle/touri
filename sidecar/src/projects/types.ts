@@ -13,6 +13,7 @@ import type {
 } from "@touri/contracts"
 
 export type ProjectErrorCode =
+  | import("@touri/contracts").VaultErrorCode
   | "INVALID_ARGS"
   | "NOT_FOUND"
   | "PROJECT_EXISTS"
@@ -170,6 +171,7 @@ export type Supervisor = {
   logs: (args: { processId: string; tail: number; grep?: string }) => ProjectResult<{ lines: Array<string> }>
   previews: (args?: { projectId?: string }) => Array<PreviewTarget>
   openPreview: (args: {
+    botId?: string
     project: Project
     port?: number
     processName?: string

@@ -12,7 +12,6 @@ import type {
   Kernel,
   Message,
   MessagePart,
-  MessageStatus,
   Provider,
   ReasoningEffort,
   RouteModule,
@@ -24,6 +23,7 @@ import type {
   ThreadUsage,
   UiEvent,
 } from "@touri/contracts"
+import { normalizeBotName } from "@touri/contracts"
 import { validAvatarColor, validAvatarShape } from "@touri/contracts/avatar"
 import { installDoctor } from "../doctor"
 import { parseBotFolders } from "../kernel/bot-folders"
@@ -41,11 +41,13 @@ import { historyThreadPending, hydrateHistoryEvent } from "../kernel/history-bac
 import { externalizeMessageParts, OUTPUT_BLOB_ORIGIN } from "../kernel/output-blobs"
 import { isProfileProvider, validProviderProfileName } from "../kernel/provider-profiles"
 import { materializeTranscript } from "../kernel/transcript-storage"
+import { hostComputerSupported } from "../platform"
 import { touriVersion } from "../version"
 import { DEFAULT_BOT_VM_MEMORY_MB, DEFAULT_MACHINE_IDLE_MINUTES, validBotVmMemory } from "../vm/resources"
 import { redeemFileGrant } from "./redeemFileGrant"
 import { createSendJournal } from "./send-journal"
 import { appendRejection, recordTranscriptRejection } from "./transcript-rejections"
+import { type RawMessage, readWorkspaceActivity } from "./workspace-activity"
 
 export const name = "store"
 
@@ -73,6 +75,7 @@ type RawBot = {
   home_dir: string
   main_thread_id: string | null
   browser_enabled: number
+  browser: Bot["browser"]
   computer_use: number
   machine: Bot["machine"]
   cloud_target?: number
@@ -111,28 +114,6 @@ type RawThread = {
   created_at: number
   updated_at: number
   archived_at: number | null
-}
-
-type RawMessage = {
-  seq: number
-  generation: number
-  updated_seq: number
-  client_nonce: string | null
-  delivery_status: NonNullable<Message["delivery"]>["status"] | null
-  delivery_deadline: number | null
-  id: string
-  thread_id: string
-  parent_id: string | null
-  role: Message["role"]
-  kind: Message["kind"]
-  status: MessageStatus
-  run_id: string | null
-  text: string
-  parts_json: string
-  sender_json: string | null
-  source: string
-  created_at: number
-  updated_at: number
 }
 
 type RawAttachment = {
@@ -239,6 +220,7 @@ const asBot = (row: RawBot): Bot => ({
   homeDir: row.home_dir,
   mainThreadId: row.main_thread_id,
   browserEnabled: row.browser_enabled === 1,
+  browser: row.browser,
   computerUse: row.computer_use === 1,
   machine: row.cloud_target === 1 ? "cloud" : row.machine,
   machineIdleMinutes: row.machine_idle_minutes,
@@ -740,15 +722,34 @@ export const init = async (kernel: Kernel): Promise<void> => {
     body: Record<string, unknown>
     existing?: Bot
   }): { input: CreateBotInput | null; error: string | null; errorCode?: string } => {
-    const name = body.name ?? existing?.name
+    const name = normalizeBotName(body.name === undefined ? existing?.name : body.name)
     const provider = body.provider ?? existing?.provider
-    if (!isString(name) || name.trim().length === 0) return { input: null, error: "name is required" }
+    if (!name)
+      return { input: null, error: "Use de 1 a 80 caracteres, sem quebras de linha ou caracteres de controle." }
     if (provider !== "codex" && provider !== "claude" && provider !== "opencode")
       return { input: null, error: "provider deve ser Codex, Claude ou OpenCode" }
-    const input: CreateBotInput = { name: name.trim(), provider }
+    const input: CreateBotInput = { name, provider }
     if (body.machine !== undefined && body.machine !== "local" && body.machine !== "vm" && body.machine !== "cloud")
       return { input: null, error: "machine must be local, vm or cloud" }
     input.machine = (body.machine as Bot["machine"] | undefined) ?? existing?.machine ?? "local"
+    if (body.browser !== undefined && !["touri", "local", "machine"].includes(body.browser as string))
+      return { input: null, error: "Escolha Chrome do touri, Meu Chrome ou Chrome da máquina." }
+    input.browser = (body.browser as Bot["browser"] | undefined) ?? existing?.browser ?? "touri"
+    if (input.browser === "local" && input.machine !== "local")
+      return {
+        input: null,
+        errorCode: "LOCAL_BROWSER_REQUIRES_HOST",
+        error: "Meu Chrome só funciona em bots neste Mac. A máquina remota não pode acessar o Chrome do Mac.",
+      }
+    // Changing the execution destination keeps the old routing unless a browser was explicitly chosen.
+    if (body.browser === undefined) {
+      if (input.machine === "vm") input.browser = "machine"
+      else if (input.browser === "machine") input.browser = "touri"
+    }
+    if (input.browser === "machine" && input.machine !== "vm")
+      return { input: null, error: "Chrome da máquina requer um bot na máquina Linux." }
+    if (input.machine === "vm" && input.browser !== "machine")
+      return { input: null, error: "Para um bot na máquina Linux, escolha Chrome da máquina." }
     if (input.machine === "cloud") {
       if (provider === "opencode")
         return {
@@ -776,6 +777,7 @@ export const init = async (kernel: Kernel): Promise<void> => {
         return { input: null, error: `${field} must be a boolean` }
       input[field] = (body[field] as boolean | undefined) ?? existing?.[field] ?? false
     }
+    if (!hostComputerSupported) input.hostComputerUse = false
     if (input.machine === "cloud") {
       input.vmProviderLogin = false
       input.hostComputerUse = false
@@ -926,7 +928,7 @@ export const init = async (kernel: Kernel): Promise<void> => {
       )
     database
       .query(
-        "UPDATE bots SET machine = ?, machine_idle_minutes = ?, vm_provider_login = ?, host_computer_use = ?, cloud_target = ? WHERE id = ?",
+        "UPDATE bots SET machine = ?, machine_idle_minutes = ?, vm_provider_login = ?, host_computer_use = ?, cloud_target = ?, browser = ? WHERE id = ?",
       )
       .run(
         input.machine === "cloud" ? "local" : (input.machine ?? "local"),
@@ -934,6 +936,7 @@ export const init = async (kernel: Kernel): Promise<void> => {
         input.vmProviderLogin ? 1 : 0,
         input.hostComputerUse ? 1 : 0,
         input.machine === "cloud" ? 1 : 0,
+        input.browser ?? "touri",
         id,
       )
     database
@@ -1015,7 +1018,7 @@ export const init = async (kernel: Kernel): Promise<void> => {
     database.query(`UPDATE bots SET ${fields.join(", ")} WHERE id = ?`).run(...values, bot.id)
     database
       .query(
-        "UPDATE bots SET machine = ?, machine_idle_minutes = ?, vm_provider_login = ?, host_computer_use = ?, cloud_target = ? WHERE id = ?",
+        "UPDATE bots SET machine = ?, machine_idle_minutes = ?, vm_provider_login = ?, host_computer_use = ?, cloud_target = ?, browser = ? WHERE id = ?",
       )
       .run(
         input.machine === "cloud" ? "local" : (input.machine ?? bot.machine),
@@ -1023,6 +1026,7 @@ export const init = async (kernel: Kernel): Promise<void> => {
         input.vmProviderLogin ? 1 : 0,
         input.hostComputerUse ? 1 : 0,
         input.machine === "cloud" ? 1 : 0,
+        input.browser ?? bot.browser,
         bot.id,
       )
     database
@@ -1036,6 +1040,47 @@ export const init = async (kernel: Kernel): Promise<void> => {
     if (updated) kernel.publish({ type: "bot.updated", bot: updated })
     return updated
   }
+
+  kernel.services.provide("bots.rename", ({ botId, name: value }) => {
+    const bot = getBot({ botId })
+    if (!bot) return { success: false, errorCode: "NOT_FOUND", error: "Bot não encontrado." }
+    const name = normalizeBotName(value)
+    if (!name)
+      return {
+        success: false,
+        errorCode: "INVALID_ARGS",
+        error: "Use de 1 a 80 caracteres, sem quebras de linha ou caracteres de controle.",
+      }
+    // Identity changes must not reconfigure or stop a machine during its own turn.
+    database.query("UPDATE bots SET name = ?, updated_at = ? WHERE id = ?").run(name, now(), botId)
+    const updated = getBot({ botId })
+    if (!updated) return { success: false, errorCode: "NOT_FOUND", error: "Bot não encontrado." }
+    kernel.publish({ type: "bot.updated", bot: updated })
+    return { success: true, bot: updated }
+  })
+
+  // MCP setup changes share PATCH's validation, storage and bot.updated event.
+  // They must not stop a VM while its current turn is waiting for the tool.
+  kernel.services.provide("bots.configureAccess", ({ botId, patch }) => {
+    const bot = getBot({ botId })
+    if (!bot) return { success: false, errorCode: "NOT_FOUND", error: "Bot não encontrado." }
+    const parsed = botFromBody({ body: { ...patch, name: bot.name, provider: bot.provider }, existing: bot })
+    if (!parsed.input || parsed.error)
+      return { success: false, errorCode: "INVALID_ARGS", error: parsed.error ?? "Configuração inválida." }
+    const machine = database.query("SELECT project_id FROM bot_machines WHERE bot_id = ?").get(botId) as {
+      project_id: string | null
+    } | null
+    if (patch.projectId && machine?.project_id && patch.projectId !== machine.project_id)
+      return {
+        success: false,
+        errorCode: "MACHINE_PROJECT_CHANGE",
+        error: "Recrie a máquina do zero antes de trocar o projeto; o volume atual foi preservado",
+      }
+    const updated = patchBot({ bot, input: parsed.input, paused: undefined })
+    return updated
+      ? { success: true, bot: updated }
+      : { success: false, errorCode: "NOT_FOUND", error: "Bot não encontrado." }
+  })
 
   const insertAttachment = ({
     path,
@@ -1239,8 +1284,23 @@ export const init = async (kernel: Kernel): Promise<void> => {
     routes: [
       {
         method: "GET",
+        path: "/workspace/activity",
+        handler: async () => {
+          flushDeltas()
+          const { messages, runs } = readWorkspaceActivity(database)
+          return jsonResponse(200, { messages: messages.map(asMessage), runs })
+        },
+      },
+      {
+        method: "GET",
         path: "/health",
-        handler: async () => jsonResponse(200, { ok: true, version: touriVersion, schemaVersion: SCHEMA_VERSION }),
+        handler: async () =>
+          jsonResponse(200, {
+            ok: true,
+            version: touriVersion,
+            schemaVersion: SCHEMA_VERSION,
+            host: process.platform === "darwin" && process.env.TOURI_HEADLESS !== "1" ? "mac" : "server",
+          }),
       },
       {
         method: "GET",
@@ -1262,7 +1322,7 @@ export const init = async (kernel: Kernel): Promise<void> => {
           const record = requestRecord(body)
           if (!record) return errorResponse(400, "INVALID_ARGS", "Request body must be an object")
           const parsed = botFromBody({
-            body: { ...record, name: record.name ?? bot.name, provider: record.provider ?? bot.provider },
+            body: { ...record, provider: record.provider ?? bot.provider },
             existing: bot,
           })
           if (!parsed.input || parsed.error)
@@ -1503,11 +1563,16 @@ export const init = async (kernel: Kernel): Promise<void> => {
               : errorResponse(404, "NOT_FOUND", "Attachment source file not found")
           }
           if (
+            record &&
+            isString(record.dataBase64) &&
+            record.dataBase64.length > Math.ceil(MAX_ATTACHMENT_BYTES / 3) * 4
+          )
+            return errorResponse(413, "ATTACHMENT_TOO_LARGE", "Arquivo acima de 15 MB")
+          if (
             !record ||
             !isString(record.dataBase64) ||
             !isString(record.name) ||
             record.name.length > 255 ||
-            record.dataBase64.length > Math.ceil(MAX_ATTACHMENT_BYTES / 3) * 4 ||
             !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(record.dataBase64)
           )
             return errorResponse(400, "INVALID_ARGS", "Envie um arquivo de até 15 MB")

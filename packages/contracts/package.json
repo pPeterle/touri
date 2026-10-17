@@ -1,13 +1,15 @@
 {
   "name": "@touri/contracts",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
     "./avatar": "./src/avatar.ts",
+    "./approval-summary": "./src/approval-summary.ts",
     "./redaction": "./src/redaction.ts",
     "./run-failure": "./src/run-failure.ts",
+    "./routine-cron": "./src/routine-cron.ts",
     "./errors": "./src/errors.ts"
   },
   "dependencies": {

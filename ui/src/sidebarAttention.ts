@@ -1,4 +1,4 @@
-import type { Message, NotificationRecord } from "@touri/contracts"
+import type { Message, NotificationRecord, Run } from "@touri/contracts"
 import { isResolvedNotification, reconcileApprovalNotifications } from "./approvalState"
 
 const ATTENTION_KINDS: ReadonlyArray<NotificationRecord["kind"]> = [
@@ -15,12 +15,43 @@ const FAILURE_KINDS: ReadonlyArray<NotificationRecord["kind"]> = ["routine-defer
 export const isAttention = (item: NotificationRecord): boolean => ATTENTION_KINDS.includes(item.kind)
 export const isFailureNotice = (item: NotificationRecord): boolean => FAILURE_KINDS.includes(item.kind)
 
-/** A later completion in the same conversation makes a failure historical, not an outstanding request. */
+/** A new run handles the previous failure, even before its resolution arrives over the event stream. */
+export const reconcileFailureNotifications = (
+  items: ReadonlyArray<NotificationRecord>,
+  runs: ReadonlyArray<Run>,
+): Array<NotificationRecord> =>
+  items.map((item) => {
+    if (isResolvedNotification(item) || !isFailureNotice(item) || item.threadId === null) return item
+    const later = runs.find(
+      (run) =>
+        run.botId === item.botId &&
+        run.threadId === item.threadId &&
+        (run.status === "succeeded"
+          ? (run.finishedAt ?? run.startedAt ?? run.queuedAt)
+          : (run.startedAt ?? run.queuedAt)) > item.createdAt,
+    )
+    const completed = items.find(
+      (next) =>
+        next.kind === "done" &&
+        next.botId === item.botId &&
+        next.threadId === item.threadId &&
+        next.createdAt > item.createdAt,
+    )
+    const resolvedAt = later
+      ? later.status === "succeeded"
+        ? (later.finishedAt ?? later.startedAt ?? later.queuedAt)
+        : (later.startedAt ?? later.queuedAt)
+      : completed?.createdAt
+    return resolvedAt ? { ...item, resolvedAt, resolution: "expired" } : item
+  })
+
+/** A later run or completion in the same conversation makes a failure historical. */
 export const pendingNotifications = (
   items: ReadonlyArray<NotificationRecord>,
   messages: ReadonlyArray<Message> = [],
+  runs: ReadonlyArray<Run> = [],
 ): Array<NotificationRecord> =>
-  reconcileApprovalNotifications([...items], [...messages])
+  reconcileFailureNotifications(reconcileApprovalNotifications([...items], [...messages]), runs)
     .filter((item) => {
       if (isResolvedNotification(item) || !isAttention(item)) return false
       if (!isFailureNotice(item)) return true

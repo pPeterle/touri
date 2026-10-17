@@ -4,13 +4,13 @@ import { runLegacyImportInto } from "../importer/legacy/cli"
 import { atomicWriteFile, ensurePrivateDirectory } from "../kernel/files"
 import { createAppPaths } from "../kernel/paths"
 import { providerProfileDir, providerProfileVariables } from "../kernel/provider-profiles"
-import { buildChildEnv } from "../kernel/shell-env"
+import { buildChildEnv, withToolPath } from "../kernel/shell-env"
 import { runMcpStdio } from "../main"
 import { listProviderProfiles } from "../runtime/provider-profiles"
 import { resolveExecutable } from "../runtime/utils"
 import type { CliCommand } from "./args"
 import { usageText } from "./args"
-import { type AuthStore, openAuthStore } from "./auth/store"
+import { type AuthStore, isDatabaseBusy, openAuthStore } from "./auth/store"
 import { runDoctor } from "./doctor"
 import { authDbName, runServeCommand } from "./serve"
 import { isProcessAlive, readServeInfo } from "./serveInfo"
@@ -167,7 +167,7 @@ const runProfileLogin = async (command: Extract<CliCommand, { name: "profile-log
   })
   const dir = providerProfileDir({ appData: command.dataDir, profile: command.profile, provider: command.provider })
   ensurePrivateDirectory({ root: command.dataDir, path: dir })
-  const env = buildChildEnv({ overrides: variables })
+  const env = withToolPath(buildChildEnv({ overrides: variables }))
   const binary =
     command.provider === "claude"
       ? (process.env.TOURI_CLAUDE_BIN ?? "claude")
@@ -189,10 +189,7 @@ const runProfileLogin = async (command: Extract<CliCommand, { name: "profile-log
 }
 
 const runMcp = async (command: Extract<CliCommand, { name: "mcp-stdio" }>): Promise<number> => {
-  await runMcpStdio({
-    threadId: command.threadId,
-    ...(command.dataDir === undefined ? {} : { appData: command.dataDir }),
-  })
+  await runMcpStdio({ threadId: command.threadId, appData: command.dataDir })
   return Number(process.exitCode ?? 0)
 }
 
@@ -210,9 +207,16 @@ export const runCommandLine = async (command: CliCommand): Promise<number> => {
     await runServeCommand(command.options)
     return -1
   }
-  if (command.name === "pair") return runPair(command)
-  if (command.name === "devices") return runDevices(command)
-  if (command.name === "status") return runStatus(command)
+  if (command.name === "pair" || command.name === "devices" || command.name === "status") {
+    try {
+      if (command.name === "pair") return await runPair(command)
+      if (command.name === "devices") return await runDevices(command)
+      return await runStatus(command)
+    } catch (error) {
+      if (!isDatabaseBusy(error)) throw error
+      return fail("Server may still be starting: database is busy. Try again in a few seconds.")
+    }
+  }
   if (command.name === "doctor") return runDoctor(command)
   if (command.name === "import-legacy") return runImport(command)
   if (command.name === "profile-list") return runProfileList(command)

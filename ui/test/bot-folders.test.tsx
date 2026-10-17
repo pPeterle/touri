@@ -4,8 +4,9 @@ import { afterEach, expect, it, vi } from "vitest"
 import App from "../src/App"
 import type { TauriInvoke } from "../src/api/client"
 import { createMockApi } from "../src/api/mock"
-import { BotSettingsModal } from "../src/components/Modals"
+import { BotCreateModal, BotSettingsModal } from "../src/components/Modals"
 import type { WorkspaceActions } from "../src/useWorkspace"
+import { selectFolder } from "./folder-picker-helpers"
 
 afterEach(() => {
   cleanup()
@@ -37,7 +38,7 @@ const setup = async (patch: Partial<Bot> = {}) => {
         invokeCommand={invoke}
         actions={actions}
         onClose={vi.fn()}
-        initialSection="computer"
+        initialSection="access"
       />,
     )
   })
@@ -46,26 +47,66 @@ const setup = async (patch: Partial<Bot> = {}) => {
 const anyToggle = () => screen.getByRole("switch", { name: /Acesso a qualquer pasta deste Mac/ })
 const save = () => fireEvent.click(screen.getByRole("button", { name: "Salvar configurações" }))
 
-it("adds a folder through the native picker, defaults read-only and saves a per-folder write choice", async () => {
-  const f = await setup()
-  expect(anyToggle()).not.toBeChecked()
-  fireEvent.click(screen.getByRole("button", { name: "Adicionar pasta…" }))
-  const select = await screen.findByRole("combobox", { name: "Acesso à pasta /Users/demo/Documents/reference" })
-  expect(f.invoke).toHaveBeenCalledWith("pick_folder", { title: "Adicionar pasta acessível ao bot" })
-  expect(select).toHaveValue("read-only")
-  fireEvent.change(select, { target: { value: "read-write" } })
-  expect(f.updateBot).not.toHaveBeenCalled()
-  save()
-  await waitFor(() =>
-    expect(f.updateBot).toHaveBeenCalledWith(
-      f.bot.id,
-      expect.objectContaining({
-        folders: [{ path: "/Users/demo/Documents/reference", access: "read-write" }],
-        anyFolderAccess: false,
-      }),
-    ),
+it.each(["codex", "claude", "opencode"] as const)(
+  "explains that %s full access preserves the separate folder limits during creation",
+  (provider) => {
+    render(<BotCreateModal onClose={vi.fn()} onCreate={vi.fn()} />)
+    fireEvent.change(screen.getByLabelText("Nome"), { target: { value: "Pesquisa" } })
+    fireEvent.click(screen.getByRole("button", { name: "Avançado" }))
+    fireEvent.change(screen.getByLabelText("Provedor"), { target: { value: provider } })
+    fireEvent.change(screen.getByLabelText("Acesso"), { target: { value: "full" } })
+    expect(screen.getByText(/O acesso total dispensa aprovações/)).toHaveTextContent(
+      "A escrita segue as permissões de pastas configuradas para o bot.",
+    )
+    expect(screen.getByText(/O acesso total dispensa aprovações/)).toHaveTextContent(
+      "A opção “Acesso a qualquer pasta deste Mac” é independente",
+    )
+    expect(screen.queryByText(/escreva em qualquer pasta/)).not.toBeInTheDocument()
+    if (provider === "codex")
+      expect(screen.getByText(/sem o sandbox do provedor/)).toHaveTextContent("As restrições de pastas do touri")
+    expect(anyToggle()).not.toBeChecked()
+    fireEvent.click(anyToggle())
+    fireEvent.click(screen.getByRole("button", { name: "Permitir acesso" }))
+    expect(anyToggle()).toBeChecked()
+    expect(screen.getByText(/O acesso total dispensa aprovações/)).toHaveTextContent(
+      "A escrita segue as permissões de pastas configuradas para o bot.",
+    )
+  },
+)
+
+it("uses the same full-access explanation in bot settings", async () => {
+  await setup({ provider: "codex", access: "full", approvals: "never" })
+  expect(screen.getByText(/O acesso total dispensa aprovações/)).toHaveTextContent(
+    "A opção “Acesso a qualquer pasta deste Mac” é independente",
   )
+  expect(screen.getByText(/sem o sandbox do provedor/)).toHaveTextContent("As restrições de pastas do touri")
 })
+
+it.each(["read-only", "read-write"] as const)(
+  "adds a folder through the shared picker with %s access and saves it",
+  async (access) => {
+    const f = await setup()
+    expect(anyToggle()).not.toBeChecked()
+    fireEvent.click(screen.getByRole("button", { name: "Adicionar pasta…" }))
+    const picker = screen.getByRole("dialog", { name: "Pastas no servidor" })
+    expect(within(picker).getByRole("radio", { name: "Somente leitura", exact: true })).toBeChecked()
+    await selectFolder("/workspace/reference", access === "read-write" ? access : undefined)
+    const select = await screen.findByRole("combobox", { name: "Acesso à pasta /workspace/reference" })
+    expect(f.invoke).not.toHaveBeenCalled()
+    expect(select).toHaveValue(access)
+    expect(f.updateBot).not.toHaveBeenCalled()
+    save()
+    await waitFor(() =>
+      expect(f.updateBot).toHaveBeenCalledWith(
+        f.bot.id,
+        expect.objectContaining({
+          folders: [{ path: "/workspace/reference", access }],
+          anyFolderAccess: false,
+        }),
+      ),
+    )
+  },
+)
 
 it("removes a folder and saves an empty list", async () => {
   const f = await setup({ folders: [{ path: "/reference", access: "read-write" }] })
@@ -99,36 +140,45 @@ it("requires confirmation, supports cancel/Escape, and disables broad access wit
   expect(screen.queryByRole("dialog", { name: "Permitir acesso a qualquer pasta?" })).not.toBeInTheDocument()
 })
 
-it("explains VM paths, masking and next-turn recreation while preserving files", async () => {
+it("explains VM paths, masking and recreation from the next message while preserving files", async () => {
   await setup({ machine: "vm" })
-  expect(screen.getByText(/as pastas serão aplicadas.*próximo turno/)).toHaveTextContent(
+  expect(screen.getByText(/as pastas valerão a partir da próxima mensagem/)).toHaveTextContent(
     "Os arquivos da máquina serão preservados.",
   )
   expect(screen.getByText(/sua pasta pessoal aparece em/)).toHaveTextContent("/host/home")
 })
 
-it("creates and links a project from the settings selector and keeps that link when saving other settings", async () => {
-  const f = await setup()
-  fireEvent.change(screen.getByRole("combobox", { name: "Projeto" }), { target: { value: "__add_project__" } })
-  const dialog = await screen.findByRole("dialog", { name: "Conectar projeto" })
-  expect(within(dialog).getByRole("checkbox", { name: /mark/ })).toBeChecked()
-  expect(within(dialog).getByRole("checkbox", { name: /mark/ })).toBeDisabled()
-  fireEvent.click(within(dialog).getByRole("button", { name: "Escolher pasta" }))
-  await waitFor(() =>
-    expect(within(dialog).getByLabelText("Pasta do projeto")).toHaveValue("/Users/demo/Documents/reference"),
-  )
-  fireEvent.change(within(dialog).getByLabelText("Nome do projeto"), { target: { value: "Referência" } })
-  fireEvent.click(within(dialog).getByRole("button", { name: "Conectar projeto" }))
-  await waitFor(() => expect(f.updateBot).toHaveBeenCalledTimes(1))
-  const linkedId = f.updateBot.mock.calls[0]?.[1].projectId
-  expect(linkedId).toBeTruthy()
-  expect(f.bot.projectId).toBe(linkedId)
-  fireEvent.click(within(dialog).getByRole("button", { name: "Fechar diálogo" }))
-  save()
-  await waitFor(() =>
-    expect(f.updateBot).toHaveBeenLastCalledWith(f.bot.id, expect.objectContaining({ projectId: linkedId })),
-  )
-})
+it.each(["read-only", "read-write"] as const)(
+  "creates and links a project with %s access and preserves it when saving settings",
+  async (access) => {
+    const f = await setup()
+    fireEvent.click(screen.getByRole("tab", { name: "Projeto" }))
+    fireEvent.change(screen.getByRole("combobox", { name: "Projeto" }), { target: { value: "__add_project__" } })
+    const dialog = await screen.findByRole("dialog", { name: "Conectar projeto" })
+    expect(within(dialog).getByRole("checkbox", { name: /mark/ })).toBeChecked()
+    expect(within(dialog).getByRole("checkbox", { name: /mark/ })).toBeDisabled()
+    fireEvent.click(within(dialog).getByRole("button", { name: "Escolher pasta" }))
+    await selectFolder("/workspace/reference", access)
+    await waitFor(() => expect(within(dialog).getByLabelText("Pasta do projeto")).toHaveValue("/workspace/reference"))
+    fireEvent.change(within(dialog).getByLabelText("Nome do projeto"), { target: { value: "Referência" } })
+    fireEvent.click(within(dialog).getByRole("button", { name: "Conectar projeto" }))
+    await waitFor(() => expect(f.updateBot).toHaveBeenCalledTimes(1))
+    const linkedId = f.updateBot.mock.calls[0]?.[1].projectId
+    expect(linkedId).toBeTruthy()
+    expect(f.bot.projectId).toBe(linkedId)
+    fireEvent.click(within(dialog).getByRole("button", { name: "Fechar diálogo" }))
+    save()
+    await waitFor(() =>
+      expect(f.updateBot).toHaveBeenLastCalledWith(
+        f.bot.id,
+        expect.objectContaining({
+          projectId: linkedId,
+          folders: access === "read-only" ? [{ path: "/workspace/reference", access: "read-only" }] : [],
+        }),
+      ),
+    )
+  },
+)
 
 it("shows the broad-access badge in the bot header and removes it when access is disabled", async () => {
   const api = createMockApi()

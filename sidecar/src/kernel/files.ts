@@ -15,35 +15,39 @@ import {
   writeSync,
 } from "node:fs"
 import { basename, dirname, relative, resolve, sep } from "node:path"
+import { closeOnExec, errnoSymbol, libcLibrary, quotaExceeded } from "../platform/posix"
+import { nativeFileOperation } from "../platform/windows-native"
 import { TouriError } from "./errors"
 
 // Node's path APIs cannot pin ancestor directories during rename. These small POSIX
 // calls keep every operation relative to an O_NOFOLLOW directory descriptor.
-const native = dlopen(process.platform === "darwin" ? "/usr/lib/libSystem.B.dylib" : "libc.so.6", {
-  openat: { args: ["i32", "cstring", "i32", "u32"], returns: "i32" },
-  mkdirat: { args: ["i32", "cstring", "u32"], returns: "i32" },
-  renameat: { args: ["i32", "cstring", "i32", "cstring"], returns: "i32" },
-  unlinkat: { args: ["i32", "cstring", "i32"], returns: "i32" },
-  [process.platform === "darwin" ? "__error" : "__errno_location"]: { args: [], returns: "ptr" },
-}).symbols
+const openNative = () =>
+  dlopen(libcLibrary, {
+    openat: { args: ["i32", "cstring", "i32", "u32"], returns: "i32" },
+    mkdirat: { args: ["i32", "cstring", "u32"], returns: "i32" },
+    renameat: { args: ["i32", "cstring", "i32", "cstring"], returns: "i32" },
+    unlinkat: { args: ["i32", "cstring", "i32"], returns: "i32" },
+    [errnoSymbol]: { args: [], returns: "ptr" },
+  }).symbols
+let cachedNative: ReturnType<typeof openNative> | undefined
+const native = () => (cachedNative ??= openNative())
 
 const cstring = (text: string): Buffer => Buffer.from(`${text}\0`)
 const errno = (): number => {
-  const pointer = native[process.platform === "darwin" ? "__error" : "__errno_location"]?.()
+  const pointer = native()[errnoSymbol]?.()
   return pointer ? read.i32(pointer) : 0
 }
-const closeOnExec = process.platform === "darwin" ? 0x1000000 : 0x80000
 const directoryFlags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW | closeOnExec
 const failure = (): TouriError => {
   const code = errno()
-  if (code === 28 || code === (process.platform === "darwin" ? 69 : 122)) return new TouriError("TOURI-E2002")
+  if (code === 28 || code === quotaExceeded) return new TouriError("TOURI-E2002")
   return new TouriError(code === 13 || code === 1 ? "TOURI-E2000" : "TOURI-E2001")
 }
 const openAt = (parent: number, name: string, flags: number, mode = 0): number =>
-  native.openat(parent, cstring(name), flags, mode)
+  native().openat(parent, cstring(name), flags, mode)
 
 const directoryAt = (parent: number, name: string, create: boolean): number => {
-  if (create && native.mkdirat(parent, cstring(name), 0o700) < 0 && errno() !== 17) throw failure()
+  if (create && native().mkdirat(parent, cstring(name), 0o700) < 0 && errno() !== 17) throw failure()
   const fd = openAt(parent, name, directoryFlags)
   if (fd < 0) throw new TouriError("TOURI-E2000")
   return fd
@@ -51,6 +55,8 @@ const directoryAt = (parent: number, name: string, create: boolean): number => {
 
 /** Pins an existing workspace directory without creating or modifying any path. Caller closes the fd. */
 export const openWorkspaceDirectory = ({ root, path }: { root: string; path: string }): number => {
+  if (process.platform === "win32")
+    throw new Error("Native directory-descriptor workspace access is not available on Windows")
   if (path.includes("\0") || path.startsWith("/") || path.split("/").some((part) => part === ".."))
     throw new TouriError("TOURI-E2000")
   const absoluteRoot = resolve(root)
@@ -68,10 +74,41 @@ export const openWorkspaceDirectory = ({ root, path }: { root: string; path: str
   }
 }
 
+/** Creates subdirectories under an existing root without following links or changing its permissions. */
+export const createWorkspaceDirectory = ({
+  root,
+  path,
+  identity,
+}: {
+  root: string
+  path: string
+  identity: { dev: number; ino: number }
+}): void => {
+  if (path.includes("\0") || path.startsWith("/") || path.split("/").some((part) => part === ".."))
+    throw new TouriError("TOURI-E2000")
+  let fd = openWorkspaceDirectory({ root, path: "" })
+  try {
+    const info = fstatSync(fd)
+    if (info.dev !== identity.dev || info.ino !== identity.ino) throw new TouriError("TOURI-E2000")
+    for (const part of path.split("/").filter(Boolean)) {
+      const next = directoryAt(fd, part, true)
+      closeSync(fd)
+      fd = next
+    }
+  } finally {
+    closeSync(fd)
+  }
+}
+
 export const MAX_ATTACHMENT_BYTES = 15 * 1024 * 1024
 
 /** Read one bounded regular file through pinned, no-follow directory descriptors. */
 export const readBoundedFile = ({ root, path, maxBytes }: { root: string; path: string; maxBytes: number }): Buffer => {
+  if (process.platform === "win32") {
+    const value = nativeFileOperation<string | null>("read_bounded", { root, path, max_bytes: maxBytes })
+    if (value === null) throw new TouriError("TOURI-E2000")
+    return Buffer.from(value, "base64")
+  }
   const parts = pathParts(root, path)
   const name = parts.pop()
   if (!name) throw new TouriError("TOURI-E2000")
@@ -114,11 +151,22 @@ export const attachmentMime = (bytes: Uint8Array): string => rasterMime(bytes) ?
 
 /** Opens one entry relative to a pinned directory; symlinks and blocking device reads are refused. */
 export const openWorkspaceEntry = (directory: number, name: string): number => {
+  if (process.platform === "win32") throw new Error("Native workspace descriptors are unavailable on Windows")
   if (!name || name === "." || name === ".." || name.includes("/") || name.includes("\0"))
     throw new TouriError("TOURI-E2000")
   const fd = openAt(directory, name, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK | closeOnExec)
   if (fd < 0) throw new TouriError("TOURI-E2000")
   return fd
+}
+
+/** Creates one new child under a pinned directory, refusing existing entries. */
+export const createWorkspaceChildDirectory = (directory: number, name: string): void => {
+  if (!name || name === "." || name === ".." || name.includes("/") || name.includes("\0"))
+    throw new TouriError("TOURI-E2000")
+  if (native().mkdirat(directory, cstring(name), 0o700) < 0) {
+    if (errno() === 17) throw Object.assign(new Error("Directory exists"), { code: "EEXIST" })
+    throw failure()
+  }
 }
 
 const rootDirectory = (root: string): number => {
@@ -215,6 +263,10 @@ export type FileWrite = { root: string; path: string; content: string | Uint8Arr
 /** Injectable durability operations allow deterministic failure and ordering tests. */
 export const createAtomicWriter = ({ sync = fsyncSync }: { sync?: (fd: number) => void } = {}) => {
   return ({ root, path, content, mode = 0o600 }: FileWrite): void => {
+    if (process.platform === "win32") {
+      nativeFileOperation("write", { root, path, content: Buffer.from(content).toString("base64") })
+      return
+    }
     const parts = pathParts(root, path)
     const name = parts.pop()
     if (!name) throw new TouriError("TOURI-E2000")
@@ -239,12 +291,12 @@ export const createAtomicWriter = ({ sync = fsyncSync }: { sync?: (fd: number) =
         fchmodSync(fd, mode)
         sync(fd)
         validateTarget(directory, name)
-        if (native.renameat(directory, cstring(temporary), directory, cstring(name)) < 0) throw failure()
+        if (native().renameat(directory, cstring(temporary), directory, cstring(name)) < 0) throw failure()
         renamed = true
         sync(directory)
       } finally {
         closeSync(fd)
-        if (!renamed) native.unlinkat(directory, cstring(temporary), 0)
+        if (!renamed) native().unlinkat(directory, cstring(temporary), 0)
       }
     })
   }
@@ -260,11 +312,16 @@ export const ensurePrivateDirectory = ({
   root: string
   path?: string
   mode?: number
-}): void =>
+}): void => {
+  if (process.platform === "win32") {
+    nativeFileOperation("ensure_dir", { root, path })
+    return
+  }
   withDirectory(root, pathParts(root, path), (fd) => {
     fchmodSync(fd, mode)
     fsyncSync(fd)
   })
+}
 
 export const readPrivateFile = ({
   root,
@@ -277,6 +334,14 @@ export const readPrivateFile = ({
 }): Buffer | null => {
   if (maxBytes !== undefined && (!Number.isSafeInteger(maxBytes) || maxBytes < 1))
     throw new RangeError("O limite de bytes deve ser positivo")
+  if (process.platform === "win32") {
+    const value = nativeFileOperation<string | null>("read", {
+      root,
+      path,
+      ...(maxBytes === undefined ? {} : { max_bytes: maxBytes }),
+    })
+    return value === null ? null : Buffer.from(value, "base64")
+  }
   const parts = pathParts(root, path)
   const name = parts.pop()
   if (!name) throw new TouriError("TOURI-E2000")
@@ -323,6 +388,10 @@ export const atomicAppendFile = ({ root, path, content, maxBytes, mode }: FileWr
 }
 
 export const assertPrivateFile = ({ root, path, mode }: { root: string; path: string; mode?: number }): void => {
+  if (process.platform === "win32") {
+    nativeFileOperation("assert", { root, path })
+    return
+  }
   const parts = pathParts(root, path)
   const name = parts.pop()
   if (!name) throw new TouriError("TOURI-E2000")
@@ -341,17 +410,25 @@ export const assertPrivateFile = ({ root, path, mode }: { root: string; path: st
 }
 
 export const removePrivateFile = ({ root, path }: { root: string; path: string }): void => {
+  if (process.platform === "win32") {
+    nativeFileOperation("remove", { root, path })
+    return
+  }
   const parts = pathParts(root, path)
   const name = parts.pop()
   if (!name) throw new TouriError("TOURI-E2000")
   withDirectory(root, parts, (fd) => {
     validateTarget(fd, name)
-    if (native.unlinkat(fd, cstring(name), 0) < 0 && errno() !== 2) throw failure()
+    if (native().unlinkat(fd, cstring(name), 0) < 0 && errno() !== 2) throw failure()
     fsyncSync(fd)
   })
 }
 
 export const movePrivateFile = ({ root, from, to }: { root: string; from: string; to: string }): void => {
+  if (process.platform === "win32") {
+    nativeFileOperation("move", { root, path: from, to })
+    return
+  }
   const source = pathParts(root, from)
   const target = pathParts(root, to)
   const sourceName = source.pop()
@@ -361,7 +438,7 @@ export const movePrivateFile = ({ root, from, to }: { root: string; from: string
     withDirectory(root, target, (targetFd) => {
       validateTarget(sourceFd, sourceName)
       validateTarget(targetFd, targetName)
-      if (native.renameat(sourceFd, cstring(sourceName), targetFd, cstring(targetName)) < 0) throw failure()
+      if (native().renameat(sourceFd, cstring(sourceName), targetFd, cstring(targetName)) < 0) throw failure()
       fsyncSync(targetFd)
       fsyncSync(sourceFd)
     }),
@@ -370,6 +447,7 @@ export const movePrivateFile = ({ root, from, to }: { root: string; from: string
 
 /** SQLite retains its own WAL/transaction protocol; never rename a live database. */
 export const prepareDatabaseFile = ({ root, path }: { root: string; path: string }): string => {
+  if (process.platform === "win32") return nativeFileOperation<string>("database", { root, path })
   for (const suffix of ["", "-wal", "-shm", "-journal"])
     assertPrivateFile({ root, path: `${path}${suffix}`, mode: 0o600 })
   if (!existsSync(path)) atomicWriteFile({ root, path, content: "" })

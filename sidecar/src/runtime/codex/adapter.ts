@@ -9,11 +9,15 @@ import type {
   RunErrorClass,
   StartTurnArgs,
 } from "@touri/contracts"
+import { redactToolText } from "@touri/contracts/redaction"
+import { codexApprovalPayload } from "../../approvals/payload"
 import { buildChildEnv } from "../../kernel"
 import { redactStructured } from "../../kernel/redact"
 import { touriVersion } from "../../version"
-import { spawnFolderProvider, writableTurnFolders } from "../folder-access"
+import { createCommandOutput } from "../command-output"
+import { spawnFolderProvider } from "../folder-access"
 import { loadTurnImages } from "../loadTurnImages"
+import { withLocalTurnTemp } from "../local-turn-temp"
 import { mcpStartupError, touriMcpStartupFailed } from "../mcp-startup"
 import { applyProviderPrivacy, cliTelemetryOff, providerPrivacyConfig } from "../privacy"
 import { type ChildProcess, readProviderStderr, startLineReader, writeLine } from "../provider-io"
@@ -21,6 +25,7 @@ import { stopProviderChildren, trackProviderProcess } from "../provider-processe
 import { resolveProviderExecutable } from "../resolveProviderExecutable"
 import { asRecord, classifyProviderError, resolveExecutable, stringValue } from "../utils"
 import { codexInputItems } from "./codexInputItems"
+import { codexAccessParams, outerSeatbelt } from "./config"
 
 type RpcResponse = { id: number; result?: unknown; error?: { message?: string } }
 
@@ -35,6 +40,11 @@ const unansweredServerRequest = (method: string): { result: unknown } | { error:
 type PendingApproval = { child: ChildProcess; requestId: number | string; threadId: string; part: ApprovalPart }
 
 const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error))
+
+const sandboxStartupFailed = (text: string): boolean =>
+  /sandbox[^\n]*(?:failed to (?:start|initialize|launch)|initialization failed)|failed to (?:start|initialize|launch)[^\n]*sandbox|sandbox-exec:\s*(?:sandbox_apply|sandbox_init)[^\n]*(?:denied|not permitted)/i.test(
+    text,
+  )
 
 // app-server carries structured errors in both ErrorNotification and Turn.
 const codexErrorText = (value: unknown): string | null => {
@@ -75,12 +85,21 @@ const partFromItem = (value: unknown, completed = false): MessagePart | null => 
     } satisfies CommandPart
   }
   if (type.includes("file") && type.includes("change")) {
-    const paths = Array.isArray(item.paths) ? item.paths.filter((path): path is string => typeof path === "string") : []
+    const changes = Array.isArray(item.changes) ? item.changes.map(asRecord) : []
+    const paths = Array.isArray(item.paths)
+      ? item.paths.filter((path): path is string => typeof path === "string")
+      : changes.flatMap((change) => (typeof change?.path === "string" ? [change.path] : []))
     return {
       type: "file_change",
       callId,
       paths,
-      diff: stringValue(item.diff),
+      diff:
+        stringValue(item.diff) ??
+        (changes
+          .map((change) => stringValue(change?.diff) ?? "")
+          .filter(Boolean)
+          .join("\n") ||
+          null),
       resolution:
         item.status === "failed" || item.error
           ? "failed"
@@ -166,33 +185,21 @@ const codexArgs = ({ args, mcp }: { args: StartTurnArgs; mcp: StartTurnArgs["mcp
       `approval_policy=${JSON.stringify(args.bot.approvals)}`,
     )
   else if (args.bot.access === "read-only")
-    result.push("-c", 'sandbox_mode="read-only"', "-c", 'approval_policy="never"')
+    // On macOS touri's Seatbelt profile is the boundary (see codexAccessParams).
+    result.push(
+      "-c",
+      outerSeatbelt(args) ? 'sandbox_mode="danger-full-access"' : 'sandbox_mode="read-only"',
+      "-c",
+      'approval_policy="never"',
+    )
   if (args.bot.model) result.push("-c", `model=${args.bot.model}`)
   return result
-}
-
-const accessParams = (args: StartTurnArgs): Record<string, unknown> => {
-  const reviewer = { approvalsReviewer: "user" }
-  if (args.bot.access === "read-only") return { ...reviewer, sandbox: "read-only", approvalPolicy: "never" }
-  if (args.bot.access === "full")
-    return { ...reviewer, sandbox: "danger-full-access", approvalPolicy: args.bot.approvals }
-  return {
-    ...reviewer,
-    sandbox: "workspace-write",
-    approvalPolicy: args.bot.approvals,
-    config: {
-      sandbox_workspace_write: {
-        writable_roots: [args.bot.homeDir, ...writableTurnFolders(args)],
-        network_access: true,
-      },
-    },
-  }
 }
 
 export const createCodexAdapter = ({
   kernel,
   command,
-  interruptGraceMs = 10_000,
+  interruptGraceMs = 2_000,
 }: {
   kernel: Kernel
   command?: string
@@ -229,8 +236,9 @@ export const createCodexAdapter = ({
     return { success: true, path: resolved.path, version: stdout.trim().split(/\s+/)[0] ?? "unknown", loggedIn: true }
   }
 
-  const startTurn = async (
+  const startAttempt = async (
     args: StartTurnArgs,
+    canRetrySandbox: () => boolean,
   ): Promise<ReturnType<ProviderAdapter["startTurn"]> extends Promise<infer T> ? T : never> => {
     const env = applyProviderPrivacy(
       args.execution ? args.env : buildChildEnv({ base: process.env, overrides: args.env }),
@@ -268,7 +276,7 @@ export const createCodexAdapter = ({
       children.delete(spawned)
       expireApprovals()
     })
-    if (!args.execution) trackProviderProcess(kernel, spawned)
+    if (!args.execution) await trackProviderProcess(kernel, spawned)
     let mcpError: string | null = null
     let stopped = false
     let completed = false
@@ -276,6 +284,8 @@ export const createCodexAdapter = ({
     let rolloutPath: string | null = args.session?.rolloutPath ?? null
     let turnId: string | null = null
     const agentTexts = new Map<string, string>()
+    const commands = new Map<string, { part: CommandPart; output: ReturnType<typeof createCommandOutput> }>()
+    const approvalItems = new Map<string, Record<string, unknown>>()
     const emitAgentText = (itemId: string, delta: string): void => {
       if (!delta) return
       agentTexts.set(itemId, (agentTexts.get(itemId) ?? "") + delta)
@@ -290,8 +300,14 @@ export const createCodexAdapter = ({
       const id = nextRequestId++
       return new Promise((resolve, reject) => {
         responseWaiters.set(id, { resolve, reject })
-        void writeLine({ stdin: spawned.stdin, value: { jsonrpc: "2.0", id, method, params } })
+        void writeLine({ stdin: spawned.stdin, value: { jsonrpc: "2.0", id, method, params } }).catch((error) => {
+          responseWaiters.delete(id)
+          reject(error)
+        })
       })
+    }
+    const interrupt = (): void => {
+      if (turnId) void sendRequest("turn/interrupt", { threadId: externalSessionId, turnId }).catch(() => undefined)
     }
     let finish: (
       result:
@@ -318,7 +334,13 @@ export const createCodexAdapter = ({
       spawned.kill("SIGTERM")
       finish(result.success ? result : { ...result, error: kernel.redact(result.error) })
     }
+    const recoverSandbox = (message: string): boolean => {
+      if (!canRetrySandbox() || args.signal.aborted || !sandboxStartupFailed(message)) return false
+      complete({ success: false, errorCode: "cli_crash", error: message })
+      return true
+    }
     const onLine = (line: string): void => {
+      if (completed) return
       let parsed: unknown
       try {
         parsed = JSON.parse(line) as unknown
@@ -354,14 +376,27 @@ export const createCodexAdapter = ({
       if (method === "turn/started") {
         turnId = stringValue(params.turnId) ?? stringValue(asRecord(params.turn)?.id) ?? stringValue(params.id)
         if (turnId) args.onEvent({ type: "turn_started", externalTurnId: turnId })
+        if (stopped) interrupt()
       } else if (method === "item/agentMessage/delta") {
         const delta = stringValue(params.delta) ?? stringValue(asRecord(params.item)?.delta)
         if (delta) emitAgentText(stringValue(params.itemId) ?? stringValue(asRecord(params.item)?.id) ?? "agent", delta)
       } else if (method === "item/reasoning/summaryTextDelta") {
         const delta = stringValue(params.delta) ?? ""
         if (delta) args.onEvent({ type: "reasoning_delta", itemId: stringValue(params.itemId) ?? "reasoning", delta })
+      } else if (method === "item/commandExecution/outputDelta") {
+        const callId = stringValue(params.itemId)
+        const command = callId ? commands.get(callId) : null
+        const delta = stringValue(params.delta)
+        if (command && delta) {
+          command.part = { ...command.part, outputTail: command.output.append(delta) }
+          args.onEvent({ type: "item", part: command.part })
+        }
       } else if (method === "item/started" || method === "item/completed") {
         const item = asRecord(params.item ?? params)
+        const itemId = stringValue(item?.id) ?? stringValue(item?.callId)
+        if (method === "item/started" && item && itemId && /command|file.*change/i.test(stringValue(item.type) ?? ""))
+          approvalItems.set(itemId, item)
+        if (method === "item/completed" && itemId) approvalItems.delete(itemId)
         if (method === "item/completed" && (item?.type === "agentMessage" || item?.type === "agent_message")) {
           const itemId = stringValue(item.id) ?? "agent"
           const text = stringValue(item.text) ?? ""
@@ -369,7 +404,36 @@ export const createCodexAdapter = ({
           // Some app-server clients supply only a completed item, or omit its last delta.
           if (text.startsWith(streamed)) emitAgentText(itemId, text.slice(streamed.length))
         }
-        const part = partFromItem(params.item ?? params, method === "item/completed")
+        let part = partFromItem(params.item ?? params, method === "item/completed")
+        if (part?.type === "command") {
+          const previous = commands.get(part.callId)
+          const output = previous?.output ?? createCommandOutput(kernel.redact)
+          const completed = method === "item/completed"
+          const finalOutput = completed ? output.flush() : ""
+          part = {
+            ...part,
+            command: part.command || previous?.part.command || "",
+            cwd: part.cwd || previous?.part.cwd || "",
+            startedAt: previous?.part.startedAt ?? Date.now(),
+            outputMode: "streaming",
+            outputTail: part.outputTail
+              ? completed
+                ? redactToolText(part.outputTail, kernel.redact)
+                : output.append(part.outputTail)
+              : finalOutput || previous?.part.outputTail || "",
+          }
+          if (completed) commands.delete(part.callId)
+          else commands.set(part.callId, { part, output })
+        }
+        if (
+          method === "item/completed" &&
+          part?.type === "command" &&
+          part.exitCode !== 0 &&
+          recoverSandbox(part.outputTail)
+        ) {
+          args.onEvent({ type: "item", part })
+          return
+        }
         if (part) args.onEvent({ type: "item", part })
       } else if (method === "turn/usage" || method === "usage") {
         const usage = asRecord(params.usage) ?? params
@@ -389,6 +453,7 @@ export const createCodexAdapter = ({
         method === "item/fileChange/requestApproval" ||
         method === "item/permissions/requestApproval"
       ) {
+        if (recoverSandbox(stringValue(params.reason) ?? "")) return
         if (typeof frame.id !== "number" && typeof frame.id !== "string") {
           complete({
             success: false,
@@ -407,7 +472,12 @@ export const createCodexAdapter = ({
           type: "approval",
           approvalId,
           request,
-          detail: JSON.stringify(redactStructured(params, kernel.redact)),
+          detail: JSON.stringify(
+            redactStructured(
+              codexApprovalPayload(params, approvalItems.get(stringValue(params.itemId) ?? ""), args.fingerprint.cwd),
+              kernel.redact,
+            ),
+          ),
           decision: "pending",
         } as const
         approvals.set(approvalId, { child: spawned, requestId: frame.id, threadId: args.thread.id, part })
@@ -437,6 +507,7 @@ export const createCodexAdapter = ({
               ? "failed"
               : "succeeded"
         const providerError = codexErrorText(params) ?? codexErrorText(turn)
+        if (status === "failed" && recoverSandbox(providerError ?? "")) return
         const errorMessage = providerError === null ? null : kernel.redact(providerError)
         args.onEvent({
           type: "turn_completed",
@@ -468,15 +539,18 @@ export const createCodexAdapter = ({
       onError: (error) => complete({ success: false, errorCode: "cli_protocol", error: error.message }),
     })
     const stderrOutput = readProviderStderr(spawned.stderr, (text) => {
+      if (recoverSandbox(text)) return
       if (touriMcpStartupFailed(text)) {
         mcpError = mcpStartupError({ diagnostic: text })
         complete({ success: false, errorCode: "cli_protocol", error: mcpError })
       }
     }).catch(() => "")
     void (async () => {
+      let resuming = false
       try {
         await sendRequest("initialize", { clientInfo: { name: "touri", version: touriVersion } })
-        const access = accessParams(args)
+        args.signal.throwIfAborted()
+        const access = codexAccessParams(args)
         // Native resumes can carry a previous run's MCP arguments. Always override
         // the persisted configuration with this turn's credential before turn/start.
         const turnConfig = {
@@ -513,7 +587,10 @@ export const createCodexAdapter = ({
               ephemeral: false,
               ...turnConfig,
             }
-        const sessionResponse = await sendRequest(args.session ? "thread/resume" : "thread/start", sessionRequest)
+        resuming = !!args.session
+        const sessionResponse = await sendRequest(resuming ? "thread/resume" : "thread/start", sessionRequest)
+        resuming = false
+        args.signal.throwIfAborted()
         const details = sessionDetails(sessionResponse.result)
         externalSessionId = details.id
         rolloutPath = details.rolloutPath
@@ -523,7 +600,7 @@ export const createCodexAdapter = ({
           complete({ success: false, errorCode: loaded.errorCode, error: loaded.error })
           return
         }
-        await sendRequest("turn/start", {
+        const turnResponse = await sendRequest("turn/start", {
           threadId: externalSessionId,
           input: codexInputItems({
             input: args.input,
@@ -531,14 +608,19 @@ export const createCodexAdapter = ({
             ...(args.handoffPacket ? { textPrefix: args.handoffPacket } : {}),
           }),
           cwd: args.fingerprint.cwd,
+          summary: "auto",
           ...(args.bot.reasoningEffort ? { effort: args.bot.reasoningEffort } : {}),
         })
+        turnId ??= stringValue(asRecord(asRecord(turnResponse.result)?.turn)?.id)
+        if (stopped) interrupt()
       } catch (error) {
         const message = errorText(error)
         complete({
           success: false,
           errorCode:
-            message.toLowerCase().includes("resume") || message.toLowerCase().includes("not found")
+            (resuming && classifyProviderError(message) !== "cli_auth") ||
+            message.toLowerCase().includes("resume") ||
+            message.toLowerCase().includes("not found")
               ? "cli_protocol"
               : classifyProviderError(message),
           error: message,
@@ -566,25 +648,62 @@ export const createCodexAdapter = ({
           error: `Codex exited (${signal ?? code ?? "unknown"})${stderr ? `: ${stderr}` : ""}`,
         })
     })
+    let finishCancellation: () => void = () => undefined
+    const cancellationDeadline = new Promise<string>((resolve) => {
+      finishCancellation = () => resolve("")
+    })
     const abort = (): void => {
-      if (completed) return
+      if (stopped) return
       stopped = true
-      if (turnId)
-        void writeLine({
-          stdin: spawned.stdin,
-          value: { jsonrpc: "2.0", method: "turn/interrupt", params: { threadId: externalSessionId, turnId } },
-        })
-      const killTimer = setTimeout(() => spawned.kill("SIGKILL"), interruptGraceMs)
-      void onExit.finally(() => clearTimeout(killTimer))
+      if (!completed) interrupt()
+      const killTimer = setTimeout(() => {
+        spawned.kill("SIGKILL")
+        complete({ success: false, errorCode: "canceled", error: "Turno cancelado" })
+        finishCancellation()
+      }, interruptGraceMs)
+      // A tool may keep stderr open after the provider leader exits.
+      void Promise.all([onExit, stderrOutput]).finally(() => clearTimeout(killTimer))
     }
     args.signal.addEventListener("abort", abort, { once: true })
     if (args.signal.aborted) abort()
     const output = await resultPromise
+    await Promise.race([stderrOutput, cancellationDeadline])
     args.signal.removeEventListener("abort", abort)
-    await stderrOutput
     if (mcpError) return { success: false, errorCode: "cli_protocol", error: mcpError }
     if (!completed) spawned.kill("SIGTERM")
     return output
+  }
+
+  const startTurn: ProviderAdapter["startTurn"] = async (args) => {
+    let canRetry = !args.execution
+    const invoke = () =>
+      withLocalTurnTemp(kernel, args, (turn) =>
+        startAttempt(
+          {
+            ...turn,
+            onEvent: (event) => {
+              // Never replay completed actions or an approval the user has already seen.
+              if (
+                event.type === "approval_request" ||
+                (event.type === "item" &&
+                  !(
+                    event.part.type === "command" &&
+                    (event.part.exitCode === null ||
+                      (event.part.exitCode !== 0 && sandboxStartupFailed(event.part.outputTail)))
+                  ))
+              )
+                canRetry = false
+              args.onEvent(event)
+            },
+          },
+          () => canRetry,
+        ),
+      )
+    const result = await invoke()
+    if (result.success || !canRetry || args.signal.aborted || !sandboxStartupFailed(result.error)) return result
+    canRetry = false
+    kernel.log({ level: "warn", module: "codex", msg: "Codex: reiniciando o sandbox com pasta temporária privada" })
+    return invoke()
   }
 
   const answerApproval = async ({

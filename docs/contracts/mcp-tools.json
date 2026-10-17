@@ -4,8 +4,11 @@
   "toolsetVersion": "touri-tools-1",
   "definitions": {
     "target": {
-      "description": "Element to act on. Prefer, in order: ref (from the latest snapshot), role+name, text, css, point. role/text/css must match exactly one element or the call fails with AMBIGUOUS_TARGET.",
+      "description": "Element to act on. Prefer target: {kind: 'ref', ref: '4.43'} from a snapshot; ref is a string, never a number. A ref string or {ref: '4.43'} also works. Then prefer role+name, text, css, point. role/text/css must match exactly one element or the call fails with AMBIGUOUS_TARGET.",
       "oneOf": [
+        { "type": "string", "pattern": "^[0-9]+\\.[0-9]+$" },
+        { "type": "object", "required": ["ref"], "additionalProperties": false,
+          "properties": { "ref": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+$" } } },
         { "type": "object", "required": ["kind", "ref"], "additionalProperties": false,
           "properties": { "kind": { "const": "ref" }, "ref": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+$" } } },
         { "type": "object", "required": ["kind", "role"], "additionalProperties": false,
@@ -53,6 +56,13 @@
       "x-touri": { "group": "core", "mvp": true, "mutates": true, "internal": true, "providers": ["claude"], "deadlineMs": 1800000 }
     },
     {
+      "name": "approval_context",
+      "description": "Internal: returns the recorded approval outcome as Claude post-tool hook context. Does not request or grant permission.",
+      "inputSchema": { "type": "object", "required": ["tool_name", "tool_use_id", "hook_event_name"], "additionalProperties": false,
+        "properties": { "tool_name": { "type": "string" }, "tool_use_id": { "type": "string" }, "input": {}, "hook_event_name": { "enum": ["PostToolUse", "PostToolUseFailure"] } } },
+      "x-touri": { "group": "core", "mvp": true, "mutates": false, "internal": true, "providers": ["claude"] }
+    },
+    {
       "name": "routine_list",
       "description": "List this bot's routines. Call before routine_create; update an existing routine instead of creating a duplicate.",
       "inputSchema": { "type": "object", "additionalProperties": false, "properties": {} },
@@ -60,7 +70,7 @@
     },
     {
       "name": "routine_create",
-      "description": "Create a routine for this bot. It is created DISABLED; the user enables it in the app.",
+      "description": "Create a routine for this bot and request explicit user approval in chat to activate it. Remains disabled if not approved. Always requires approval, even with approvals disabled.",
       "inputSchema": { "type": "object", "required": ["name", "prompt", "cron", "timezone"], "additionalProperties": false,
         "properties": {
           "name": { "type": "string", "maxLength": 80 },
@@ -69,7 +79,7 @@
           "timezone": { "type": "string", "description": "IANA zone, e.g. America/Sao_Paulo" },
           "continuity": { "enum": ["new-thread", "results-thread", "main-thread"], "default": "new-thread" },
           "timeoutMinutes": { "type": "integer", "minimum": 1, "maximum": 240, "default": 30 } } },
-      "x-touri": { "group": "core", "mvp": true, "mutates": true }
+      "x-touri": { "group": "core", "mvp": true, "mutates": true, "deadlineMs": 1800000 }
     },
     {
       "name": "routine_update",
@@ -79,6 +89,54 @@
           "routineId": { "type": "string" }, "name": { "type": "string" }, "prompt": { "type": "string" },
           "cron": { "type": "string" }, "timezone": { "type": "string" }, "enabled": { "const": false } } },
       "x-touri": { "group": "core", "mvp": true, "mutates": true }
+    },
+    {
+      "name": "bot_rename",
+      "description": "Rename this calling bot only when the user asks. Low-risk identity change; posts a visible notice in chat without an approval card. Never available for delegated requests. Use 1 to 80 characters without line breaks or control characters.",
+      "inputSchema": { "type": "object", "required": ["name"], "additionalProperties": false,
+        "properties": { "name": { "type": "string", "minLength": 1 } } },
+      "x-touri": { "group": "project", "mvp": true, "mutates": true }
+    },
+    {
+      "name": "project_discover",
+      "description": "List projects and Git repositories only in this bot's already granted folders and connected project. Never searches the home directory on its own. Read-only; no approval required. Ask the user for a path when nothing is available.",
+      "inputSchema": { "type": "object", "additionalProperties": false, "properties": {} },
+      "x-touri": { "group": "project", "mvp": true, "mutates": false }
+    },
+    {
+      "name": "project_link",
+      "description": "Register a Mac folder as a project if needed and link it to this calling bot only. Supply exactly one of path or projectId. Always requires explicit user approval in chat, even with approvals disabled. VM changes apply next turn.",
+      "inputSchema": { "type": "object", "additionalProperties": false,
+        "properties": { "path": { "type": "string", "minLength": 1 }, "projectId": { "type": "string", "minLength": 1 } },
+        "minProperties": 1, "maxProperties": 1 },
+      "x-touri": { "group": "project", "mvp": true, "mutates": true, "deadlineMs": 1800000 }
+    },
+    {
+      "name": "folder_access_request",
+      "description": "Request access to a specific Mac folder for this calling bot only, with mode read or read-write. Always requires explicit user approval. Cannot enable any-folder access. VM changes apply next turn.",
+      "inputSchema": { "type": "object", "required": ["path", "mode"], "additionalProperties": false,
+        "properties": { "path": { "type": "string", "minLength": 1 }, "mode": { "enum": ["read", "read-write"] } } },
+      "x-touri": { "group": "project", "mvp": true, "mutates": true, "deadlineMs": 1800000 }
+    },
+    {
+      "name": "capability_request",
+      "description": "Ask the person to enable this bot's isolated browser or supported computer control with an explicit approval card. Use a short reason tied to their task. Never enables silently, never available to unattended or delegated runs. On automaticContinuation, finish this turn; touri resumes the original task with updated tools. On denial, do not ask again; explain how to enable it later in bot settings.",
+      "inputSchema": { "type": "object", "required": ["capability", "reason"], "additionalProperties": false,
+        "properties": { "capability": { "enum": ["browser", "computer_use"] }, "reason": { "type": "string", "minLength": 1, "maxLength": 240, "pattern": "^(?=.*\\S)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$" } } },
+      "x-touri": { "group": "project", "mvp": true, "mutates": true, "deadlineMs": 1800000 }
+    },
+    {
+      "name": "project_unlink",
+      "description": "Unlink the project from this calling bot only. Narrows access without approval and posts a notice in chat. VM changes apply next turn.",
+      "inputSchema": { "type": "object", "additionalProperties": false, "properties": {} },
+      "x-touri": { "group": "project", "mvp": true, "mutates": true }
+    },
+    {
+      "name": "folder_access_remove",
+      "description": "Remove a specific folder grant from this calling bot only. Narrows access without approval and posts a notice in chat. Cannot change the user-only any-folder toggle. VM changes apply next turn.",
+      "inputSchema": { "type": "object", "required": ["path"], "additionalProperties": false,
+        "properties": { "path": { "type": "string", "minLength": 1 } } },
+      "x-touri": { "group": "project", "mvp": true, "mutates": true }
     },
     {
       "name": "project_info",
@@ -164,7 +222,7 @@
     },
     {
       "name": "preview_open",
-      "description": "Show a local web app in the user's Preview pane (http://localhost only). Use after the dev server is ready so the user sees it.",
+      "description": "Register a local HTTP app in touri Preview, only from this bot's supervised processes. Requires a linked project: if missing, offer project_link({path}) with explicit user approval, then process_define/process_start. Shell servers and browser_open do not create a Preview. Only report Preview as available after this tool succeeds and returns a target; the user opens the Preview pane to view it.",
       "inputSchema": { "type": "object", "additionalProperties": false,
         "properties": { "port": { "type": "integer", "minimum": 1, "maximum": 65535 }, "process": { "$ref": "#/definitions/processName" }, "path": { "type": "string", "default": "/" } } },
       "x-touri": { "group": "preview", "mvp": true, "mutates": true }
@@ -179,28 +237,28 @@
     {
       "name": "browser_list_tabs",
       "description": "List your tabs (id, url, title, openerTabId for popups, heldByUser). After a sign-in click, look here for the popup; when it closes, return to the opener and verify sign-in: closure alone does not prove success.",
-      "inputSchema": { "type": "object", "additionalProperties": false, "properties": {} },
+      "inputSchema": { "type": "object", "additionalProperties": false, "properties": { "timeoutMs": { "$ref": "#/definitions/timeoutMs" } } },
       "x-touri": { "group": "browser", "mvp": true, "mutates": false }
     },
     {
       "name": "browser_close_tab",
       "description": "Close one of your tabs when done with it.",
       "inputSchema": { "type": "object", "required": ["tabId"], "additionalProperties": false,
-        "properties": { "tabId": { "$ref": "#/definitions/tabId" } } },
+        "properties": { "tabId": { "$ref": "#/definitions/tabId" }, "timeoutMs": { "$ref": "#/definitions/timeoutMs" } } },
       "x-touri": { "group": "browser", "mvp": true, "mutates": true }
     },
     {
       "name": "browser_snapshot",
       "description": "Read the page: url, title, focus, up to 200 interactive elements with refs, viewport-first text (capped), your last 10 actions and the last 20 console/network errors. Refs are valid only for this snapshot's generation; any navigation or newer snapshot invalidates them. image=auto attaches a screenshot only when text alone is misleading (canvas/video, iframes, low semantic coverage). If truncated=true, scroll or wait_for text to read more.",
       "inputSchema": { "type": "object", "required": ["tabId"], "additionalProperties": false,
-        "properties": { "tabId": { "$ref": "#/definitions/tabId" }, "image": { "enum": ["auto", "always", "never"], "default": "auto" } } },
+        "properties": { "tabId": { "$ref": "#/definitions/tabId" }, "image": { "enum": ["auto", "always", "never"], "default": "auto" }, "timeoutMs": { "$ref": "#/definitions/timeoutMs" } } },
       "x-touri": { "group": "browser", "mvp": true, "mutates": false }
     },
     {
       "name": "browser_screenshot",
       "description": "Viewport (or full-page) screenshot, size-bounded. Prefer browser_snapshot; use this for visual checks.",
       "inputSchema": { "type": "object", "required": ["tabId"], "additionalProperties": false,
-        "properties": { "tabId": { "$ref": "#/definitions/tabId" }, "fullPage": { "type": "boolean", "default": false } } },
+        "properties": { "tabId": { "$ref": "#/definitions/tabId" }, "fullPage": { "type": "boolean", "default": false }, "timeoutMs": { "$ref": "#/definitions/timeoutMs" } } },
       "x-touri": { "group": "browser", "mvp": true, "mutates": false }
     },
     {
@@ -242,21 +300,21 @@
       "name": "browser_scroll",
       "description": "Scroll the page or a target into view and return a fresh snapshot.",
       "inputSchema": { "type": "object", "required": ["tabId"], "additionalProperties": false,
-        "properties": { "tabId": { "$ref": "#/definitions/tabId" }, "target": { "$ref": "#/definitions/target" }, "direction": { "enum": ["down", "up"], "default": "down" }, "pages": { "type": "number", "minimum": 0.1, "maximum": 10, "default": 1 } } },
+        "properties": { "tabId": { "$ref": "#/definitions/tabId" }, "target": { "$ref": "#/definitions/target" }, "direction": { "enum": ["down", "up"], "default": "down" }, "pages": { "type": "number", "minimum": 0.1, "maximum": 10, "default": 1 }, "timeoutMs": { "$ref": "#/definitions/timeoutMs" } } },
       "x-touri": { "group": "browser", "mvp": true, "mutates": true }
     },
     {
       "name": "browser_select_option",
       "description": "Select option(s) of a <select> or listbox by value or label and return a fresh snapshot.",
       "inputSchema": { "type": "object", "required": ["tabId", "target", "values"], "additionalProperties": false,
-        "properties": { "tabId": { "$ref": "#/definitions/tabId" }, "target": { "$ref": "#/definitions/target" }, "values": { "type": "array", "items": { "type": "string" }, "minItems": 1 } } },
+        "properties": { "tabId": { "$ref": "#/definitions/tabId" }, "target": { "$ref": "#/definitions/target" }, "values": { "type": "array", "items": { "type": "string" }, "minItems": 1 }, "timeoutMs": { "$ref": "#/definitions/timeoutMs" } } },
       "x-touri": { "group": "browser", "mvp": true, "mutates": true }
     },
     {
       "name": "browser_set_checked",
       "description": "Set a checkbox/radio/switch state and return a fresh snapshot.",
       "inputSchema": { "type": "object", "required": ["tabId", "target", "checked"], "additionalProperties": false,
-        "properties": { "tabId": { "$ref": "#/definitions/tabId" }, "target": { "$ref": "#/definitions/target" }, "checked": { "type": "boolean" } } },
+        "properties": { "tabId": { "$ref": "#/definitions/tabId" }, "target": { "$ref": "#/definitions/target" }, "checked": { "type": "boolean" }, "timeoutMs": { "$ref": "#/definitions/timeoutMs" } } },
       "x-touri": { "group": "browser", "mvp": false, "mutates": true }
     },
     {
@@ -283,7 +341,7 @@
       "name": "browser_evaluate",
       "description": "Run a read-only JavaScript expression in the page and return its JSON value (max 20 KB). Disabled while secret entry is active in the tab.",
       "inputSchema": { "type": "object", "required": ["tabId", "expression"], "additionalProperties": false,
-        "properties": { "tabId": { "$ref": "#/definitions/tabId" }, "expression": { "type": "string", "maxLength": 5000 } } },
+        "properties": { "tabId": { "$ref": "#/definitions/tabId" }, "expression": { "type": "string", "maxLength": 5000 }, "timeoutMs": { "$ref": "#/definitions/timeoutMs" } } },
       "x-touri": { "group": "browser", "mvp": false, "mutates": false }
     },
     {

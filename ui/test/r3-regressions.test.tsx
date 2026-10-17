@@ -177,10 +177,12 @@ describe("r3 P2 chat and navigation", () => {
     const { api } = fixture()
     render(<App kernel={{ services: { api } }} />)
     await screen.findByRole("textbox", { name: "Mensagem para mark" })
-    fireEvent.click(screen.getByRole("button", { name: /^Permissões do bot: / }))
+    fireEvent.click(screen.getByRole("button", { name: "Painel do bot" }))
+    fireEvent.click(screen.getByRole("button", { name: "Ajustar permissões" }))
     const panel = screen.getByRole("dialog", { name: "Permissões do bot" })
     expect(within(panel).queryByRole("option", { name: "Acesso total com aprovação" })).toBeNull()
-    fireEvent.change(within(panel).getByLabelText("Acesso"), { target: { value: "full" } })
+    fireEvent.change(within(panel).getByLabelText("Acesso", { selector: "select" }), { target: { value: "full" } })
+    fireEvent.click(within(panel).getByRole("tab", { name: "Modelo" }))
     fireEvent.change(within(panel).getByLabelText("Raciocínio"), { target: { value: "" } })
     fireEvent.click(within(panel).getByRole("button", { name: "Salvar configurações" }))
     await waitFor(() =>
@@ -300,13 +302,19 @@ describe("r3 login and MCP settings", () => {
           : { server: { ...input, tools: [{ name: "search_threads", description: "" }] } },
       ) as ApiRequest
       render(<BotMcpSettings api={{ ...api, request }} botId="mail-r3" />)
+      fireEvent.click(screen.getByRole("button", { name: "Configuração técnica (MCP)" }))
       await screen.findByText(/Nenhum servidor externo conectado/)
       fireEvent.change(screen.getByLabelText("Nome do servidor MCP"), { target: { value: "gmail" } })
       fireEvent.change(screen.getByLabelText("Transporte MCP"), { target: { value: transport } })
       fireEvent.change(screen.getByLabelText(transport === "stdio" ? "Comando MCP" : "URL MCP"), {
         target: { value: transport === "stdio" ? "gmail-mcp" : "https://example.com/mcp" },
       })
+      fireEvent.click(screen.getByRole("button", { name: "Testar conexão" }))
+      await waitFor(() => expect(screen.getByRole("button", { name: "Conectar servidor MCP" })).toBeEnabled())
       fireEvent.click(screen.getByRole("button", { name: "Conectar servidor MCP" }))
+      await screen.findByText(/Conexão disponível:/)
+      expect(screen.queryByText("search_threads")).not.toBeInTheDocument()
+      fireEvent.click(screen.getByRole("button", { name: "Configuração técnica (MCP)" }))
       await screen.findByText("search_threads")
       expect(request).toHaveBeenCalledWith("PUT /bots/:id/mcp/:name", expect.objectContaining({ transport }), {
         id: "mail-r3",
@@ -416,6 +424,7 @@ describe("r3 P3 integrity", () => {
     const { api } = fixture()
     const hook = renderHook(() => useWorkspace(api))
     await waitFor(() => expect(hook.result.current.data.loading).toBe(false))
+    await waitFor(() => expect(hook.result.current.data.processes.length).toBeGreaterThan(0))
     const order = hook.result.current.data.bots.map((bot) => bot.id)
     const bot = hook.result.current.data.bots[0] as Bot
     const process = hook.result.current.data.processes[0]
@@ -442,6 +451,8 @@ describe("r3 P3 integrity", () => {
     const { api } = fixture()
     render(<App kernel={{ services: { api } }} />)
     await screen.findByRole("textbox", { name: "Mensagem para mark" })
+    if (!screen.queryByRole("button", { name: "Preview do projeto" }))
+      fireEvent.click(screen.getByRole("button", { name: "Painel do bot" }))
     fireEvent.click(screen.getByRole("button", { name: "Preview do projeto" }))
     for (const button of screen.getAllByRole("button", { name: "Parar" })) expect(button).toBeDisabled()
   })

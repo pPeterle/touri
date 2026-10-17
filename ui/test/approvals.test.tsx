@@ -69,6 +69,7 @@ it("MCP classification and policy edits save the selected tool for this bot", as
   })
   api.request = request as ApiRequest
   render(<BotMcpSettings api={api} botId="bot-a" />)
+  fireEvent.click(screen.getByRole("button", { name: "Configuração técnica (MCP)" }))
   const policy = await screen.findByRole("combobox", { name: "Política · save" })
   fireEvent.change(policy, { target: { value: "blocked" } })
   await waitFor(() =>
@@ -160,8 +161,11 @@ it("MCP policy changes refresh standing grants in the permissions modal", async 
       onClose={vi.fn()}
     />,
   )
+  fireEvent.click(screen.getByRole("button", { name: "Avançado" }))
+  fireEvent.click(screen.getByRole("tab", { name: "Permissões" }))
   await screen.findByText("docs · save")
-  fireEvent.click(screen.getByRole("tab", { name: "MCP" }))
+  fireEvent.click(screen.getByRole("tab", { name: "Ferramentas" }))
+  fireEvent.click(screen.getByRole("button", { name: "Configuração técnica (MCP)" }))
   fireEvent.change(await screen.findByRole("combobox", { name: "Política · save" }), { target: { value: "blocked" } })
   fireEvent.click(screen.getByRole("tab", { name: "Permissões" }))
   await screen.findByText("Nenhuma permissão permanente concedida.")
@@ -171,10 +175,11 @@ it("MCP policy changes refresh standing grants in the permissions modal", async 
 it("Codex creation hides full access with approval and explains sandbox behavior", () => {
   render(<BotCreateModal onClose={vi.fn()} onCreate={vi.fn()} />)
   fireEvent.change(screen.getByLabelText("Nome"), { target: { value: "Teste" } })
-  fireEvent.click(screen.getByRole("button", { name: "Continuar" }))
-  fireEvent.click(screen.getByRole("button", { name: "Continuar" }))
+  fireEvent.click(screen.getByRole("button", { name: "Avançado" }))
   expect(screen.queryByRole("option", { name: "Acesso total com aprovação" })).toBeNull()
-  expect(screen.getByText(/Com acesso total, o Codex executa sem pedir aprovação/)).toBeVisible()
+  expect(screen.getByText(/No acesso total, o Codex executa sem pedir aprovação/)).toHaveTextContent(
+    "As restrições de pastas do touri",
+  )
   expect(screen.getByRole("option", { name: "Somente leitura" })).toBeVisible()
 })
 
@@ -193,12 +198,13 @@ it("switching a Claude bot with full approved access to Codex saves full access 
       onClose={vi.fn()}
     />,
   )
-  fireEvent.click(screen.getByRole("tab", { name: "Permissões" }))
+  fireEvent.click(screen.getByRole("button", { name: "Avançado" }))
+  fireEvent.click(screen.getByRole("tab", { name: "Acesso" }))
   expect(screen.getByRole("option", { name: "Acesso total com aprovação" })).toBeVisible()
-  fireEvent.click(screen.getByRole("tab", { name: "Geral" }))
+  fireEvent.click(screen.getByRole("tab", { name: "Modelo" }))
   fireEvent.change(screen.getByRole("combobox", { name: "Provedor" }), { target: { value: "codex" } })
   expect(screen.queryByRole("option", { name: "Acesso total com aprovação" })).toBeNull()
-  fireEvent.click(screen.getByRole("tab", { name: "Permissões" }))
+  fireEvent.click(screen.getByRole("tab", { name: "Acesso" }))
   expect(screen.getByRole("combobox", { name: "Acesso" })).toHaveValue("full")
   fireEvent.click(screen.getByRole("button", { name: "Salvar configurações" }))
   await waitFor(() =>

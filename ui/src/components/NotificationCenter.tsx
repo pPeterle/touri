@@ -1,14 +1,23 @@
-import type { Message, NotificationRecord, RespondBehavior } from "@touri/contracts"
+import type { Message, NotificationRecord, RespondBehavior, Run } from "@touri/contracts"
 import { useEffect, useRef, useState } from "react"
 import { createPortal } from "react-dom"
-import { isResolvedNotification, reconcileApprovalNotifications, resolvedApprovalLabel } from "../approvalState"
-import { userFacingError } from "../errors"
+import { type ApprovalTarget, pendingApprovalTargets } from "../approvalNavigation"
+import { approvalNotificationSummary } from "../approvalNotice"
+import {
+  isResolvedNotification,
+  reconcileApprovalMessages,
+  reconcileApprovalNotifications,
+  resolvedApprovalLabel,
+  uniqueApprovalNotifications,
+} from "../approvalState"
+import type { RecoveryAction } from "../errorRecovery"
 import { dictionaries, localizeNotice, type TranslationKey, t } from "../i18n"
 import { markdownSummary } from "../markdownSummary"
 // r8-sidebar: shared attention projection; resolved and superseded failures stay in history.
-import { pendingNotifications } from "../sidebarAttention"
+import { isFailureNotice, pendingNotifications } from "../sidebarAttention"
 import { useAvatarBot } from "./AvatarRuntime"
 import { BotAvatar } from "./BotAvatar"
+import { ErrorNotice } from "./ErrorNotice"
 import { MotionPresence, useInsertedIds } from "./Motion"
 import "./screens.css"
 
@@ -38,8 +47,8 @@ const KIND_KEY: Record<NotificationRecord["kind"], TranslationKey> = {
   "delegation-settled": "Delegation",
 }
 
-const hasReplyBox = (item: NotificationRecord): boolean =>
-  item.kind === "question" || (item.kind === "done" && item.body.trim().endsWith("?"))
+// Only a real question from the bot gets a reply box; a finished turn that ends in "?" is a reply.
+const hasReplyBox = (item: NotificationRecord): boolean => item.kind === "question"
 
 const age = (createdAt: number, now: number): string => {
   const minutes = Math.max(0, Math.round((now - createdAt) / 60_000))
@@ -55,6 +64,7 @@ export type NotificationActions = {
   dismissAll: () => Promise<void>
   respond: (args: { notification: NotificationRecord; behavior: RespondBehavior; message?: string }) => Promise<void>
   reply: (args: { notification: NotificationRecord; text: string }) => Promise<void>
+  recover?: (item: NotificationRecord, action: RecoveryAction) => Promise<void>
 }
 
 const NotificationRow = ({
@@ -62,34 +72,52 @@ const NotificationRow = ({
   now,
   actions,
   inserted,
+  messages,
+  runs,
 }: {
   item: NotificationRecord
   now: number
   actions: NotificationActions
   inserted: boolean
+  messages: Message[]
+  runs: Run[]
 }) => {
   const bot = useAvatarBot(item.botId)
   const [text, setText] = useState("")
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<unknown>(null)
   const resolved = isResolvedNotification(item)
+  const approval = item.kind === "approval" ? approvalNotificationSummary(item, messages) : null
   const title =
     resolved && item.kind === "approval"
       ? item.resolution === "dismissed"
         ? "Solicitação dispensada"
         : resolvedApprovalLabel(
-            item.resolution === "allow" ? "approved" : item.resolution === "expired" ? "expired" : "denied",
+            item.resolution === "allow"
+              ? "approved"
+              : item.resolution === "expired" || item.resolution === "canceled"
+                ? "expired"
+                : "denied",
           )
-      : markdownSummary(localizeNotice(item.title))
-  // Approval bodies carry command arguments whose literal characters must stay visible.
-  const body = item.kind === "approval" ? localizeNotice(item.body) : markdownSummary(localizeNotice(item.body))
+      : (approval?.title ?? markdownSummary(localizeNotice(item.title)))
+  const body = approval?.body ?? markdownSummary(localizeNotice(item.body))
+  const failed = item.kind === "turn-failed" || item.kind === "routine-failed" || item.kind === "incident"
+  const failedRun = runs
+    .filter(
+      (run) =>
+        run.threadId === item.threadId &&
+        (run.status === "failed" || run.status === "interrupted") &&
+        (run.finishedAt ?? 0) <= item.createdAt + 1000,
+    )
+    .sort((a, b) => (b.finishedAt ?? 0) - (a.finishedAt ?? 0))[0]
+  const failedMessage = messages.find((message) => message.id === failedRun?.replyMessageId)
   const run = async (task: () => Promise<void>): Promise<void> => {
     setBusy(true)
     setError(null)
     try {
       await task()
     } catch (error) {
-      setError(userFacingError(error))
+      setError(error)
     } finally {
       setBusy(false)
     }
@@ -122,6 +150,7 @@ const NotificationRow = ({
         <div className="notification-head">
           <strong>{item.botName ?? "touri"}</strong>
           <span className={`notification-kind kind-${item.level}`}>{t(KIND_KEY[item.kind])}</span>
+          {resolved && isFailureNotice(item) && <span>{t("Resolvido")}</span>}
           <time
             dateTime={new Date(item.createdAt).toISOString()}
             title={new Date(item.createdAt).toLocaleString("pt-BR")}
@@ -129,15 +158,37 @@ const NotificationRow = ({
             {age(item.createdAt, now)}
           </time>
         </div>
-        {![t(KIND_KEY[item.kind]), dictionaries.en[KIND_KEY[item.kind]], item.kind].some(
-          (label) => label.toLowerCase() === title.toLowerCase(),
-        ) && <p className="notification-title">{title}</p>}
+        {!failed &&
+          ![t(KIND_KEY[item.kind]), dictionaries.en[KIND_KEY[item.kind]], item.kind].some(
+            (label) => label.toLowerCase() === title.toLowerCase(),
+          ) && <p className="notification-title">{title}</p>}
         {item.resolvedAt !== null && item.kind === "approval" && (
           <time dateTime={new Date(item.resolvedAt).toISOString()}>
             {new Date(item.resolvedAt).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}
           </time>
         )}
-        {body.toLowerCase() !== t(KIND_KEY[item.kind]).toLowerCase() && <p className="notification-body">{body}</p>}
+        {failed ? (
+          <ErrorNotice
+            error={failedRun?.errorMessage ?? item.body}
+            context={{
+              provider: failedRun?.provider,
+              errorClass: failedRun?.errorClass,
+              parts: failedMessage?.parts,
+              savedMessage: !!failedRun?.requestMessageId,
+              occurredAt: failedRun?.finishedAt ?? item.createdAt,
+            }}
+            onAction={(action) => (actions.recover ? actions.recover(item, action) : actions.open(item))}
+          />
+        ) : (
+          body.toLowerCase() !== t(KIND_KEY[item.kind]).toLowerCase() && <p className="notification-body">{body}</p>
+        )}
+        {approval?.command && <pre className="notification-command">{approval.command}</pre>}
+        {approval?.technical && (
+          <details className="notification-technical">
+            <summary>{t("Detalhes técnicos")}</summary>
+            <pre>{approval.technical}</pre>
+          </details>
+        )}
         {!resolved && item.kind === "approval" && item.requestId && (
           <div className="notification-buttons">
             <button
@@ -188,7 +239,7 @@ const NotificationRow = ({
         <div className="notification-links">
           {item.threadId && (
             <button type="button" onClick={() => actions.open(item)}>
-              {t("Open")}
+              {t(item.kind === "approval" ? "Revisar" : "Open")}
             </button>
           )}
           {!resolved && (
@@ -197,7 +248,11 @@ const NotificationRow = ({
             </button>
           )}
         </div>
-        {error && <p role="alert">{error}</p>}
+        {error !== null && (
+          <div role="alert">
+            <ErrorNotice error={error} />
+          </div>
+        )}
       </div>
     </li>
   )
@@ -206,15 +261,19 @@ const NotificationRow = ({
 export const NotificationBell = ({
   notifications,
   messages = [],
+  runs = [],
   actions,
   now = Date.now(),
   onOpenChange,
+  onReviewApproval,
 }: {
   notifications: Array<NotificationRecord>
   messages?: Array<Message>
+  runs?: Array<Run>
   actions: NotificationActions
   now?: number
   onOpenChange?: (open: boolean) => void
+  onReviewApproval?: ((target: ApprovalTarget) => void) | undefined
 }) => {
   const [open, setOpen] = useState(false)
   const inserted = useInsertedIds(notifications.map((item) => String(item.id)))
@@ -227,6 +286,11 @@ export const NotificationBell = ({
   }, [open, onOpenChange])
   const navigationActions = {
     ...actions,
+    recover: async (item: NotificationRecord, action: RecoveryAction) => {
+      setOpen(false)
+      if (actions.recover) await actions.recover(item, action)
+      else actions.open(item)
+    },
     open: (item: NotificationRecord) => {
       setOpen(false)
       actions.open(item)
@@ -235,10 +299,17 @@ export const NotificationBell = ({
   const container = useRef<HTMLDivElement | null>(null)
   const popover = useRef<HTMLElement | null>(null)
   const [position, setPosition] = useState({ left: 12, bottom: 52 })
-  const visible = reconcileApprovalNotifications(notifications, messages).filter(
+  const visible = uniqueApprovalNotifications(reconcileApprovalNotifications(notifications, messages)).filter(
     (item) => !clearedIds.has(notificationKey(item)),
   )
   const pending = pendingNotifications(visible, messages)
+  const missingApprovals = pendingApprovalTargets(reconcileApprovalMessages(messages, notifications)).filter(
+    (target) =>
+      !pending.some(
+        (item) => item.kind === "approval" && item.threadId === target.threadId && item.requestId === target.approvalId,
+      ),
+  )
+  const attentionCount = pending.length + missingApprovals.length
   const recent = visible
     .filter((item) => !pending.includes(item))
     .sort((a, b) => b.createdAt - a.createdAt || b.id - a.id)
@@ -305,7 +376,7 @@ export const NotificationBell = ({
       <button
         type="button"
         className="settings-button notification-bell"
-        aria-label={pending.length ? t("Notifications need attention", { count: pending.length }) : t("Notifications")}
+        aria-label={attentionCount ? t("Notifications need attention", { count: attentionCount }) : t("Notifications")}
         aria-expanded={open}
         onClick={() => setOpen((current) => !current)}
       >
@@ -323,7 +394,7 @@ export const NotificationBell = ({
           <path d="M6 9a6 6 0 1 1 12 0c0 6 2 7 2 7H4s2-1 2-7" />
           <path d="M10 20a2 2 0 0 0 4 0" />
         </svg>
-        {pending.length > 0 && <span className="notification-badge">{pending.length > 9 ? "9+" : pending.length}</span>}
+        {attentionCount > 0 && <span className="notification-badge">{attentionCount > 9 ? "9+" : attentionCount}</span>}
       </button>
       {/* r8 motion: retain only the inert popover during its exit. */}
       {createPortal(
@@ -352,7 +423,22 @@ export const NotificationBell = ({
                 Não foi possível limpar as notificações. Tente novamente.
               </p>
             )}
-            {ordered.length === 0 && <p className="notification-empty">{t("Nothing needs you right now.")}</p>}
+            {ordered.length === 0 && missingApprovals.length === 0 && (
+              <p className="notification-empty">{t("Nothing needs you right now.")}</p>
+            )}
+            {missingApprovals.map((target) => (
+              <button
+                key={target.approvalId}
+                type="button"
+                className="text-button"
+                onClick={() => {
+                  setOpen(false)
+                  onReviewApproval?.(target)
+                }}
+              >
+                {t("Review pending approval")}
+              </button>
+            ))}
             {groups
               .filter((group) => group.items.length > 0)
               .map((group) => (
@@ -366,6 +452,8 @@ export const NotificationBell = ({
                         now={now}
                         actions={navigationActions}
                         inserted={inserted.has(String(item.id))}
+                        messages={messages}
+                        runs={runs}
                       />
                     ))}
                   </ul>
@@ -373,7 +461,7 @@ export const NotificationBell = ({
               ))}
           </section>
         </MotionPresence>,
-        document.body,
+        container.current?.closest("dialog") ?? document.body,
       )}
     </div>
   )

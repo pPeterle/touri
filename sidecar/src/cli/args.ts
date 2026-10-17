@@ -32,7 +32,7 @@ export type CliCommand =
   | { name: "doctor"; dataDir: string; port: number }
   | { name: "devices"; dataDir: string; revokeId: string | null }
   | { name: "import-legacy"; dataDir: string; path: string; dryRun: boolean; importCodexSessions: boolean }
-  | { name: "mcp-stdio"; threadId: string; dataDir?: string }
+  | { name: "mcp-stdio"; threadId: string; dataDir: string }
   | { name: "profile-list"; dataDir: string }
   | { name: "profile-login"; dataDir: string; profile: string; provider: "claude" | "codex" }
   | { name: "version" }
@@ -203,7 +203,10 @@ const buildWithPort = (flags: Flags, name: "status" | "doctor"): ParseCliResult 
 }
 
 /** Parses `process.argv.slice(2)` into a typed command. */
-export const parseCli = (argv: Array<string>): ParseCliResult => {
+export const parseCli = (
+  argv: Array<string>,
+  env: Record<string, string | undefined> = process.env,
+): ParseCliResult => {
   const parsed = parseFlags(argv)
   if (!parsed.success) return parsed
   const { flags } = parsed
@@ -223,12 +226,10 @@ export const parseCli = (argv: Array<string>): ParseCliResult => {
   if (command === "mcp-stdio") {
     const threadId = flags.values["--thread"]
     if (threadId === undefined) return { success: false, error: "mcp-stdio needs --thread <id>" }
-    // Without --data-dir the shim follows TOURI_APP_DATA, which `serve` sets for the bots' CLI.
-    const dataDir = flags.values["--data-dir"]
-    return {
-      success: true,
-      command: { name: "mcp-stdio", threadId, ...(dataDir === undefined ? {} : { dataDir: expandHome(dataDir) }) },
-    }
+    // The runtime launches the shim with TOURI_APP_DATA, not --data-dir, so a server on a custom data dir is found.
+    const dataDir =
+      flags.values["--data-dir"] === undefined && env.TOURI_APP_DATA ? env.TOURI_APP_DATA : dataDirOf(flags)
+    return { success: true, command: { name: "mcp-stdio", threadId, dataDir } }
   }
   return { success: false, error: `Unknown command ${command}` }
 }

@@ -1,12 +1,14 @@
 import type { ApprovalPart } from "@touri/contracts"
-import { type KeyboardEventHandler, type ReactNode, useId } from "react"
+import { type KeyboardEventHandler, type ReactNode, useEffect, useId, useState } from "react"
 import type { UiApi } from "../api/client"
+import { compactApprovalDiff } from "./approvalContent"
 import { browserToolPresentation, browserToolResult } from "./browserToolPresentation"
 import { DiffOutput } from "./DiffOutput"
 import { RevealDetails, useReveal } from "./Reveal"
 import { ToolCode } from "./ToolCode"
 import { StoredToolOutput, ToolOutput, ToolText } from "./ToolOutput"
 import { type ToolKind, type ToolPart, type ToolStatus, toolPresentation, toolStatus } from "./toolPresentation"
+import "./approval-content.css"
 
 const iconPaths = {
   terminal: "m5 6 4 4-4 4m7 0h5",
@@ -48,6 +50,20 @@ const labels: Record<ToolStatus, string> = {
 export const toolTime = (timestamp: number): string =>
   new Date(timestamp).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })
 
+const CommandElapsed = ({ startedAt }: { startedAt: number }) => {
+  const [now, setNow] = useState(Date.now)
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1_000)
+    return () => clearInterval(timer)
+  }, [])
+  return (
+    <span role="timer" aria-label="Tempo de execução">
+      {" "}
+      · {Math.max(0, Math.floor((now - startedAt) / 1_000))} s
+    </span>
+  )
+}
+
 export const ToolCallCard = ({
   part,
   approval,
@@ -75,6 +91,7 @@ export const ToolCallCard = ({
   const revealRef = useReveal<HTMLElement>()
   const browser = browserToolPresentation(part?.type === "tool_call" ? part : undefined)
   const presentation = { ...toolPresentation(part, approval), ...browser }
+  const reviewedFiles = new Map(presentation.review?.files.map((file) => [file.path, file]))
   const result = browser && part?.type === "tool_call" ? browserToolResult(part.outputJson) : null
   const pending = approval?.decision === "pending"
   const status = pending
@@ -90,11 +107,14 @@ export const ToolCallCard = ({
       : pending
         ? createdAt
         : (part?.resolvedAt ?? createdAt)
+  const liveCommand = status === "running" && presentation.kind === "terminal"
   const rawOutput =
     part?.type === "tool_call"
-      ? part.outputJson
+      ? liveCommand
+        ? part.outputTail || part.outputJson
+        : (part.outputJson ?? part.outputTail)
       : part?.type === "command"
-        ? part.outputTail || "Sem saída"
+        ? part.outputTail || (liveCommand ? null : "Sem saída")
         : part?.diff
   return (
     <article
@@ -128,6 +148,9 @@ export const ToolCallCard = ({
           {timestamp !== undefined && (
             <time dateTime={new Date(timestamp).toISOString()}> · {toolTime(timestamp)}</time>
           )}
+          {liveCommand && part && "startedAt" in part && part.startedAt !== undefined && (
+            <CommandElapsed startedAt={part.startedAt} />
+          )}
         </span>
       </header>
       <p className="tool-summary" title={presentation.summary}>
@@ -137,14 +160,30 @@ export const ToolCallCard = ({
         <ul className="tool-file-list" aria-label="Arquivos">
           {[...new Set(presentation.filePaths)].map((path) => (
             <li key={path}>
+              {reviewedFiles.has(path) && <span>{reviewedFiles.get(path)?.action} </span>}
               <span className="tool-file-chip" title={path}>
                 <ToolIcon kind="files" />
                 <span className="tool-file-path">{path.slice(0, path.lastIndexOf("/") + 1)}</span>
                 <strong>{path.slice(path.lastIndexOf("/") + 1)}</strong>
               </span>
+              {reviewedFiles.get(path)?.diff && (
+                <figure className="tool-approval-diff" aria-label={`Prévia das alterações em ${path}`}>
+                  <pre>
+                    <code>{compactApprovalDiff(reviewedFiles.get(path)?.diff ?? "")}</code>
+                  </pre>
+                </figure>
+              )}
             </li>
           ))}
         </ul>
+      )}
+      {presentation.review?.missingFiles && <p className="tool-summary">{presentation.review.missingFiles}</p>}
+      {presentation.review?.diff && (
+        <figure className="tool-approval-diff" aria-label="Prévia das alterações">
+          <pre>
+            <code>{compactApprovalDiff(presentation.review.diff)}</code>
+          </pre>
+        </figure>
       )}
       {presentation.code && (
         <figure
@@ -182,6 +221,18 @@ export const ToolCallCard = ({
           )}
         </div>
       )}
+      {presentation.review && (
+        <dl className="tool-approval-context">
+          {[{ label: "Motivo", value: presentation.review.reason }, ...presentation.review.scope].map(
+            ({ label, value }) => (
+              <div key={label}>
+                <dt>{label}</dt>
+                <dd>{value}</dd>
+              </div>
+            ),
+          )}
+        </dl>
+      )}
       {approval?.standing && <strong className="tool-standing-label">Permissão permanente neste bot</strong>}
       {actions}
       {error && (
@@ -191,6 +242,13 @@ export const ToolCallCard = ({
       )}
       {result?.title && <p className="tool-summary">{result.title}</p>}
       {result?.url && <p className="tool-summary">{result.url}</p>}
+      {liveCommand && !rawOutput && !part?.outputAttachmentId && (
+        <p className="tool-summary">
+          {part && "outputMode" in part && part.outputMode === "on_completion"
+            ? "A saída aparece quando o comando terminar."
+            : "Aguardando saída do comando…"}
+        </p>
+      )}
       {part?.outputAttachmentId ? (
         <StoredToolOutput
           key={part.outputAttachmentId}
@@ -206,7 +264,11 @@ export const ToolCallCard = ({
             <DiffOutput source={rawOutput ?? ""} />
           </RevealDetails>
         ) : (
-          <ToolOutput raw={(result ? result.output : rawOutput) ?? ""} callId={part?.callId ?? "tool-output"} />
+          <ToolOutput
+            raw={(result ? result.output : rawOutput) ?? ""}
+            callId={part?.callId ?? "tool-output"}
+            live={liveCommand}
+          />
         )
       ) : null}
       {part && !part.outputAttachmentId && rawOutput == null && status === "closed" && (

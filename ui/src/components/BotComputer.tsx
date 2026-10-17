@@ -1,13 +1,16 @@
 import type { Bot, MachineState } from "@touri/contracts"
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useContext, useEffect, useRef, useState } from "react"
 import type { UiApi } from "../api/client"
 import { computerKillSwitchEvent } from "../computerKillSwitch"
-import { userFacingError } from "../errors"
 import { CloudComputer } from "../features/cloud/CloudComputer"
 import { DesktopPanel } from "../features/desktop/DesktopPanel"
-import { localizeNotice, machineStatusLabel } from "../i18n"
+import { VmCapabilityNotice } from "../features/desktop/VmCapabilityNotice"
+import { localizeNotice, machineStatusLabel, t } from "../i18n"
 import { useComputerPresence } from "../machineIntents"
 import { machineStateForDisplay } from "../machineState"
+import { ErrorNotice } from "./ErrorNotice"
+import { FailureActionContext } from "./FailureActionContext"
+import { MachineStopButton } from "./MachineStopButton"
 import { PanelIcon } from "./PanelIcon"
 
 const LocalBotComputer = ({
@@ -15,6 +18,7 @@ const LocalBotComputer = ({
   bot,
   machine: rawMachine,
   paused = false,
+  activeTurns = false,
   autoOpen = false,
   expanded = false,
   onExpand,
@@ -26,12 +30,16 @@ const LocalBotComputer = ({
   machine?: MachineState | undefined
   autoOpen?: boolean
   paused?: boolean
+  activeTurns?: boolean
   expanded?: boolean
   onExpand?: () => void
   onWindow?: () => Promise<void>
   onPermissions?: () => void
+  onChat?: () => void
+  onFiles?: () => void
 }) => {
   useComputerPresence(api, bot)
+  const failureAction = useContext(FailureActionContext)
   const [viewerControl, setViewerControl] = useState(false)
   const machine = machineStateForDisplay(rawMachine)
   const [hostActive, setHostActive] = useState<boolean | null>(null)
@@ -44,7 +52,7 @@ const LocalBotComputer = ({
   )
   const [entered, setEntered] = useState(false)
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<unknown>(null)
   const [view, setView] = useState<"desktop" | "terminal">("desktop")
   const [command, setCommand] = useState("")
   const [output, setOutput] = useState("")
@@ -106,8 +114,7 @@ const LocalBotComputer = ({
           setError(responseMachine.error ?? "O computador ainda não está pronto. Tente novamente após a inicialização.")
       }
     } catch (reason) {
-      if (mounted.current && generation === openGeneration.current && awaitingComputer.current)
-        setError(userFacingError(reason))
+      if (mounted.current && generation === openGeneration.current && awaitingComputer.current) setError(reason)
     } finally {
       if (mounted.current && generation === openGeneration.current) setBusy(false)
     }
@@ -130,7 +137,7 @@ const LocalBotComputer = ({
     try {
       await api.request("POST /computer/kill", {})
     } catch (reason) {
-      if (mounted.current) setError(userFacingError(reason))
+      if (mounted.current) setError(reason)
     }
   }
   const execute = async () => {
@@ -145,7 +152,7 @@ const LocalBotComputer = ({
         setCommand("")
       }
     } catch (reason) {
-      if (mounted.current) setError(userFacingError(reason))
+      if (mounted.current) setError(reason)
     } finally {
       if (mounted.current) setExecuting(false)
     }
@@ -187,9 +194,39 @@ const LocalBotComputer = ({
               )
             : "Este bot trabalha no computador local. O controle depende das permissões do macOS e de uma autorização temporária."}
         </p>
-        {status === "error" && machine?.error && <p role="alert">{userFacingError(machine.error)}</p>}
+        {status === "error" && machine?.error && (
+          <div role="alert">
+            <ErrorNotice
+              error={machine.error}
+              context={{ provider: bot.provider }}
+              onAction={(action) =>
+                action === "retry"
+                  ? open()
+                  : failureAction(
+                      action === "login"
+                        ? { kind: "setting", settingId: "providerLogin", label: "" }
+                        : { kind: "doctor", label: "" },
+                    )
+              }
+            />
+          </div>
+        )}
         {bot.machine === "vm" ? (
           <div className="computer-actions">
+            {status === "running" && (
+              <MachineStopButton
+                api={api}
+                botId={bot.id}
+                activeTurns={activeTurns}
+                onStopped={() => {
+                  openGeneration.current += 1
+                  awaitingComputer.current = false
+                  setBusy(false)
+                  setEntered(false)
+                  setViewerControl(false)
+                }}
+              />
+            )}
             {(!entered || status !== "running") && (
               <button
                 className="button button-brand"
@@ -204,7 +241,7 @@ const LocalBotComputer = ({
                   : preparing
                     ? "Preparando…"
                     : status === "running"
-                      ? "Entrar no computador"
+                      ? t("Acompanhar a tela")
                       : inactivityPaused
                         ? "Ligar"
                         : "Ligar computador"}
@@ -216,11 +253,7 @@ const LocalBotComputer = ({
               </button>
             )}
             {onWindow && (
-              <button
-                className="button button-quiet"
-                type="button"
-                onClick={() => void onWindow().catch((reason) => setError(userFacingError(reason)))}
-              >
+              <button className="button button-quiet" type="button" onClick={() => void onWindow().catch(setError)}>
                 Abrir em janela
               </button>
             )}
@@ -234,6 +267,7 @@ const LocalBotComputer = ({
         )}
         {bot.paused && <p>Retome o bot nas configurações para ligar o computador.</p>}
       </div>
+      {bot.machine === "vm" && (!entered || status !== "running") && <VmCapabilityNotice bot={bot} />}
       {bot.machine === "vm" && (!entered || status !== "running") && (
         <div className={`computer-entry ${preparing || busy ? "computer-entry-preparing" : ""}`}>
           <PanelIcon name="computer" />
@@ -271,7 +305,7 @@ const LocalBotComputer = ({
           {bot.machine === "vm"
             ? entered && status === "running" && view === "desktop"
               ? "Interrompe o controle do computador imediatamente."
-              : "Somente observar ao entrar. Controle exige permissão do bot."
+              : t("Ao assumir, só você usa o teclado e o mouse. A automação do bot continua com a permissão atual.")
             : "Autorização temporária · atalho de emergência ⌃⌥⌘."}
         </small>
         {controlActive && (
@@ -280,10 +314,10 @@ const LocalBotComputer = ({
           </button>
         )}
       </div>
-      {error && (
-        <p className="warning-callout" role="alert">
-          {error}
-        </p>
+      {error !== null && (
+        <div className="warning-callout" role="alert">
+          <ErrorNotice error={error} context={{ provider: bot.provider }} />
+        </div>
       )}
       {bot.machine === "vm" && entered && status === "running" && (
         <>
@@ -355,7 +389,25 @@ const LocalBotComputer = ({
 }
 
 export const BotComputer = (props: Parameters<typeof LocalBotComputer>[0]) =>
-  props.bot.machine === "cloud" ? (
+  props.bot.machine === "local" && !("__TAURI_INTERNALS__" in window) ? (
+    <section className="bot-computer" aria-label={`Computador de ${props.bot.name}`}>
+      <p role="status">
+        {t("Este servidor não tem uma área de trabalho para controlar. Você pode conversar e trabalhar com arquivos.")}
+      </p>
+      <div className="computer-actions">
+        {props.onChat && (
+          <button type="button" className="button button-quiet" onClick={props.onChat}>
+            {t("Conversar")}
+          </button>
+        )}
+        {props.onFiles && (
+          <button type="button" className="button button-quiet" onClick={props.onFiles}>
+            {t("Abrir arquivos")}
+          </button>
+        )}
+      </div>
+    </section>
+  ) : props.bot.machine === "cloud" ? (
     <CloudComputer api={props.api} bot={props.bot} {...(props.machine ? { machine: props.machine } : {})} />
   ) : (
     <LocalBotComputer {...props} />

@@ -4,13 +4,13 @@ import { afterEach, expect, test, vi } from "vitest"
 import App from "../src/App"
 import { createMockApi } from "../src/api/mock"
 import { BotComputer } from "../src/components/BotComputer"
+import { BotDetails } from "../src/components/BotDetails"
 import { BotPanel } from "../src/components/BotPanel"
 import { computerKillSwitchEvent } from "../src/computerKillSwitch"
 import { readWorkspaceState } from "../src/workspaceState"
 
 vi.mock("../src/features/desktop/DesktopPanel", () => ({
   DesktopPanel: ({
-    bot,
     paused,
     onControlChange,
   }: {
@@ -19,14 +19,17 @@ vi.mock("../src/features/desktop/DesktopPanel", () => ({
     onControlChange: (active: boolean) => void
   }) => (
     <section aria-label="Desktop de teste">
-      <button type="button" disabled={!bot.computerUse || paused} onClick={() => onControlChange(true)}>
-        Controlar
+      <button type="button" disabled={paused} onClick={() => onControlChange(true)}>
+        Assumir controle
       </button>
-      <span>Somente observar</span>
+      <span>Acompanhar a tela</span>
     </section>
   ),
 }))
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  vi.unstubAllGlobals()
+})
 const machine = (
   status: MachineState["status"],
   progress: string | null = null,
@@ -42,6 +45,27 @@ const fixture = async () => {
   return { api, bot }
 }
 
+test.each([
+  ["read-only", "never", "Somente leitura"],
+  ["full", "never", "Acesso total"],
+  ["workspace-write", "on-request", "Pede permissão antes de mudar arquivos"],
+] as const)("details explain %s access with %s approvals", async (access, approvals, sentence) => {
+  const { bot } = await fixture()
+  const onSettings = vi.fn()
+  const onPermissions = vi.fn()
+  render(
+    <BotDetails bot={{ ...bot, access, approvals }} onSettings={onSettings} onPermissions={onPermissions}>
+      {null}
+    </BotDetails>,
+  )
+  expect(screen.getByText(`${sentence}; só no computador isolado.`)).toBeVisible()
+  expect(screen.getByText("Trabalha no próprio computador.")).toBeVisible()
+  fireEvent.click(screen.getByRole("button", { name: /^Modelo: Codex/ }))
+  expect(onSettings).toHaveBeenCalledOnce()
+  fireEvent.click(screen.getByRole("button", { name: "Ajustar permissões" }))
+  expect(onPermissions).toHaveBeenCalledOnce()
+})
+
 test("panel tabs are accessible from arrows and save the label", async () => {
   const { api, bot } = await fixture()
   const role = vi.fn(async () => {})
@@ -56,12 +80,13 @@ test("panel tabs are accessible from arrows and save the label", async () => {
       onWindow={vi.fn()}
       onClose={vi.fn()}
       onSettings={vi.fn()}
+      onRoutines={vi.fn()}
       onPermissions={vi.fn()}
       onRole={role}
     />,
   )
-  const input = screen.getByRole("textbox", { name: "Rótulo do bot" })
-  expect(input).toHaveAttribute("placeholder", "Adicionar um rótulo")
+  const input = screen.getByRole("textbox", { name: "O que ele faz" })
+  expect(input).toHaveAttribute("placeholder", "Adicionar uma função")
   fireEvent.change(input, { target: { value: "Pesquisa de produto" } })
   fireEvent.blur(input)
   await waitFor(() => expect(role).toHaveBeenCalledWith("Pesquisa de produto"))
@@ -79,6 +104,10 @@ test("panel visibility persists independently per bot and survives remount", asy
   const api = createMockApi()
   const view = render(<App kernel={{ services: { api } }} />)
   await screen.findByRole("textbox", { name: "Mensagem para mark" })
+  expect(screen.queryByRole("complementary", { name: "Painel de mark" })).toBeNull()
+  expect(screen.getByRole("button", { name: "Painel do bot" })).toHaveAttribute("aria-expanded", "false")
+  fireEvent.click(screen.getByRole("button", { name: "Painel do bot" }))
+  expect(screen.getByRole("complementary", { name: "Painel de mark" })).toBeVisible()
   fireEvent.click(screen.getByRole("button", { name: "Fechar painel do bot" }))
   expect(readWorkspaceState().panelsByBot?.["bot-mark"]).toBe(false)
   fireEvent.click(
@@ -86,10 +115,14 @@ test("panel visibility persists independently per bot and survives remount", asy
       (screen.getAllByRole("button", { name: /onb/ })[0] as HTMLElement),
   )
   await screen.findByRole("textbox", { name: "Mensagem para onb" })
+  expect(screen.queryByRole("complementary", { name: "Painel de onb" })).toBeNull()
+  fireEvent.click(screen.getByRole("button", { name: "Painel do bot" }))
   expect(screen.getByRole("complementary", { name: "Painel de onb" })).toBeVisible()
+  expect(readWorkspaceState().panelsByBot?.["bot-onb"]).toBe(true)
   view.unmount()
   render(<App kernel={{ services: { api } }} />)
   await screen.findByRole("textbox", { name: "Mensagem para onb" })
+  expect(screen.getByRole("complementary", { name: "Painel de onb" })).toBeVisible()
   fireEvent.click(screen.getAllByRole("button", { name: /mark/ })[0] as HTMLElement)
   await screen.findByRole("textbox", { name: "Mensagem para mark" })
   expect(screen.queryByRole("complementary", { name: "Painel de mark" })).toBeNull()
@@ -110,8 +143,7 @@ for (const status of ["stopped", "starting", "running", "error"] as const)
     expect(screen.getByText("Preparando a imagem Linux")).toBeVisible()
     expect(
       screen.getByRole("button", {
-        name:
-          status === "running" ? "Entrar no computador" : status === "starting" ? "Preparando…" : "Ligar computador",
+        name: status === "running" ? "Acompanhar a tela" : status === "starting" ? "Preparando…" : "Ligar computador",
       }),
     ).toBeVisible()
     expect(screen.queryByRole("button", { name: "Interromper controle" })).toBeNull()
@@ -121,14 +153,14 @@ for (const status of ["stopped", "starting", "running", "error"] as const)
 test("computer warms with computer-open, starts view-only, gates shell/control and kills", async () => {
   const { api, bot } = await fixture()
   const view = render(<BotComputer api={api} bot={bot} machine={machine("running")} />)
-  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Entrar no computador" })))
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Acompanhar a tela" })))
   expect(api.calls).toContainEqual({
     route: "POST /bots/:id/machine/intent",
     input: { intent: "computer-open" },
     pathValues: { id: bot.id },
   })
-  expect(screen.getByText("Somente observar")).toBeVisible()
-  expect(screen.getByRole("button", { name: "Controlar" })).toBeDisabled()
+  expect(screen.getByText("Acompanhar a tela")).toBeVisible()
+  expect(screen.getByRole("button", { name: "Assumir controle" })).toBeEnabled()
   fireEvent.click(screen.getByRole("button", { name: "Terminal" }))
   expect(screen.getByLabelText("Comando na VM")).toBeDisabled()
   view.rerender(<BotComputer api={api} bot={{ ...bot, computerUse: true }} machine={machine("running")} />)
@@ -137,13 +169,14 @@ test("computer warms with computer-open, starts view-only, gates shell/control a
   expect(screen.getByRole("log")).toHaveTextContent("/workspace")
   expect(screen.queryByRole("button", { name: "Interromper controle" })).toBeNull()
   fireEvent.click(screen.getByRole("button", { name: "Área de trabalho" }))
-  fireEvent.click(screen.getByRole("button", { name: "Controlar" }))
+  fireEvent.click(screen.getByRole("button", { name: "Assumir controle" }))
   await act(async () => fireEvent.click(screen.getByRole("button", { name: "Interromper controle" })))
   expect(api.calls.some((call) => call.route === "POST /computer/kill")).toBe(true)
   expect(screen.queryByLabelText("Comando na VM")).toBeNull()
 })
 
-test("local machine explains host control instead of offering a VM", async () => {
+test("native local machine explains host control instead of offering a VM", async () => {
+  vi.stubGlobal("__TAURI_INTERNALS__", {})
   const { api, bot } = await fixture()
   const permissions = vi.fn()
   render(<BotComputer api={api} bot={{ ...bot, machine: "local" }} onPermissions={permissions} />)
@@ -166,6 +199,7 @@ test("library opens markdown through the existing renderer, navigates folders an
       onWindow={vi.fn()}
       onClose={vi.fn()}
       onSettings={vi.fn()}
+      onRoutines={vi.fn()}
       onPermissions={vi.fn()}
       onRole={vi.fn()}
     />,
@@ -191,7 +225,7 @@ test("a delayed warm response cannot reopen a computer after interruption", asyn
     return request(route, input, path)
   }
   render(<BotComputer api={api} bot={bot} machine={machine("running")} />)
-  fireEvent.click(screen.getByRole("button", { name: "Entrar no computador" }))
+  fireEvent.click(screen.getByRole("button", { name: "Acompanhar a tela" }))
   expect(screen.queryByRole("button", { name: "Interromper controle" })).toBeNull()
   fireEvent(window, new Event(computerKillSwitchEvent))
   await act(async () => complete?.({ machine: machine("running") }))
@@ -245,7 +279,9 @@ test("a stopped warm response gives an actionable error and machine cancellation
   }
   render(<BotComputer api={api} bot={bot} machine={machine("error", null, "canceled: Turno cancelado")} />)
   expect(screen.queryByText(/Cancelado/i)).toBeNull()
-  expect(screen.getByRole("status")).toHaveTextContent("parado")
+  expect(screen.getAllByRole("status").find((node) => node.classList.contains("machine-chip"))).toHaveTextContent(
+    "parado",
+  )
   await act(async () => fireEvent.click(screen.getByRole("button", { name: "Ligar computador" })))
   expect(screen.getByRole("alert")).toHaveTextContent("O computador ainda não está pronto")
   expect(screen.queryByText(/Cancelado/i)).toBeNull()
@@ -262,6 +298,7 @@ test("inactivity pause explains the stopped machine and offers Ligar without an 
 })
 
 test("local kill switch is visible only during active control of this bot", async () => {
+  vi.stubGlobal("__TAURI_INTERNALS__", {})
   const { api, bot } = await fixture()
   render(<BotComputer api={api} bot={{ ...bot, machine: "local", computerUse: true }} />)
   expect(screen.queryByRole("button", { name: "Interromper controle" })).toBeNull()

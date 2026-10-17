@@ -13,11 +13,26 @@ import type {
   ToolResult,
 } from "@touri/contracts"
 import { approveSecretRelease } from "../approvals/secrets"
-import { type ChromeLauncher, createChromeLauncher, deriveChromeWindowConfig } from "./launcher"
+import { hostPlatform } from "../platform"
+import * as macos from "../platform/macos"
+import { CHALLENGE_ELEMENT_IDS, classifyBlockedPage, describeBlockedPage } from "./blockedPage"
+import {
+  type ChromeLauncher,
+  createChromeLauncher,
+  deriveChromeWindowConfig,
+  LocalBrowserUnavailableError,
+} from "./launcher"
 import { assignLegacyCookies } from "./legacyCookieMigration"
 import { describeNavigationFailure, isChromeErrorPage, isLoadableUrl, networkErrorCode, stripHash } from "./navigation"
 import { withOneTransientRetry } from "./retry"
-import { emptySession, loadBotSession, type SavedCookie, type SavedSession, saveBotSession } from "./sessionVault"
+import {
+  emptySession,
+  loadBotSession,
+  type SavedCookie,
+  type SavedSession,
+  SessionVaultError,
+  saveBotSession,
+} from "./sessionVault"
 import { createBrowserStore, publicTabInfo } from "./store"
 import type {
   BrowserEngine,
@@ -110,6 +125,19 @@ const toToolError = (item: BrowserFailure): ToolResult => ({
     ? {}
     : { content: [{ type: "text", text: `Covering element: ${item.covering.role} "${item.covering.name}"` }] }),
 })
+
+const BLOCKED_PAGE_HEADERS = new Set(["server", "cf-mitigated"])
+
+/** Keeps only the response headers the blocked-page classifier reads, names in lower case. */
+const blockedPageHeaders = (value: unknown): Record<string, string> => {
+  const headers: Record<string, string> = {}
+  for (const [name, header] of Object.entries(asRecord(value) ?? {})) {
+    const key = name.toLowerCase()
+    const text = asString(header)
+    if (BLOCKED_PAGE_HEADERS.has(key) && text !== null) headers[key] = text.slice(0, 200)
+  }
+  return headers
+}
 
 const toToolSuccess = ({ content, structured }: { content: Array<ToolContent>; structured?: unknown }): ToolResult => ({
   success: true,
@@ -485,6 +513,7 @@ const causeHint = (message: string): string => {
 }
 
 const browserError = (error: unknown): BrowserFailure => {
+  if (error instanceof LocalBrowserUnavailableError) return { errorCode: error.errorCode, error: error.message }
   const message = errorMessage(error)
   if (isDeadlineError(message)) {
     return {
@@ -1201,12 +1230,14 @@ export const createBrowserEngine = ({
   launcher: suppliedLauncher,
   profile,
   discoverBotId,
+  localBrowser = false,
 }: {
   kernel: Kernel
   mode?: "system-chrome" | "chrome-for-testing"
   launcher?: ChromeLauncher
   profile?: string
   discoverBotId?: string
+  localBrowser?: boolean
 }): BrowserEngine => {
   const refHistory = new WeakMap<TabState, Map<string, { node: NodeRef; url: string }>>()
   const rememberRefs = (tab: TabState) => {
@@ -1215,7 +1246,7 @@ export const createBrowserEngine = ({
     while (history.size > 1000) history.delete(history.keys().next().value as string)
     refHistory.set(tab, history)
   }
-  const store = createBrowserStore({ kernel, ...(profile ? { profile } : {}) })
+  const store = createBrowserStore({ kernel, retainTargets: localBrowser, ...(profile ? { profile } : {}) })
   const launcher: ChromeLauncher =
     suppliedLauncher ?? createChromeLauncher({ kernel, ...(mode === undefined ? {} : { mode }) })
   const tabs = store.load()
@@ -1290,7 +1321,7 @@ export const createBrowserEngine = ({
     for (const tab of tabs) {
       if (tab.info.state !== "live") continue
       tab.info.state = "unloaded"
-      tab.targetId = null
+      if (!localBrowser) tab.targetId = null
       tab.sessionId = null
       tab.frameSessions.clear()
       store.save(tab)
@@ -1349,6 +1380,8 @@ export const createBrowserEngine = ({
     if (event.method === "Target.attachedToTarget") {
       const info = targetInfo(event.params.targetInfo)
       const sessionId = asString(event.params.sessionId)
+      // Browser-wide events can describe the user's tabs. Never attach to or act on them.
+      if (localBrowser && !tab && !(info?.openerId && targetToTab.has(info.openerId))) return
       if (info && sessionId && info.openerId && !targetToTab.has(info.targetId) && closeBlockedTarget(info)) return
       if (info && sessionId) {
         targetSessions.set(info.targetId, sessionId)
@@ -1418,6 +1451,16 @@ export const createBrowserEngine = ({
       return
     }
     if (!tab) return
+    if (event.method === "Target.targetInfoChanged" && localBrowser) {
+      const info = targetInfo(event.params.targetInfo)
+      if (info) {
+        tab.info.url = info.url
+        tab.info.title = info.title
+        enforceTabUrl(tab)
+        publishTab(tab)
+      }
+      return
+    }
     if (event.method === "Page.frameNavigated") {
       if (event.sessionId !== tab.sessionId) return
       syncPageNavigation(tab, event.params)
@@ -1455,6 +1498,13 @@ export const createBrowserEngine = ({
       const response = asRecord(event.params.response)
       const status = asNumber(response?.status)
       const url = asString(response?.url) ?? ""
+      if (
+        status !== null &&
+        event.sessionId === tab.sessionId &&
+        asString(event.params.type) === "Document" &&
+        asString(event.params.frameId) === tab.targetId
+      )
+        tab.mainDocument = { url, status, headers: blockedPageHeaders(response?.headers) }
       if (status !== null && status >= 400)
         recordDiagnostic(tab, {
           at: Date.now(),
@@ -1612,7 +1662,9 @@ export const createBrowserEngine = ({
     unsubscribe = client.subscribe(onEvent)
     try {
       await client.call("Target.setDiscoverTargets", { discover: true })
-      await client.call("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true })
+      if (!localBrowser)
+        await client.call("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true })
+      else client.onDisconnect?.(() => markEngineUnavailable())
       void started.process?.exited.then(() => markEngineUnavailable())
       return !retired
     } catch (error) {
@@ -1626,18 +1678,18 @@ export const createBrowserEngine = ({
         await launcher.stop()
         markEngineUnavailable()
       }
+      if (localBrowser) throw new LocalBrowserUnavailableError()
       return false
     }
   }
 
   const focusManagedChrome = async (): Promise<void> => {
-    if (windowConfig.headless || discoverBotId) return
+    if (windowConfig.headless || discoverBotId || localBrowser || hostPlatform !== macos) return
     const env = { ...(await kernel.shellEnv()), ...process.env }
     const cleanEnv: Record<string, string> = {}
     for (const [key, value] of Object.entries(env)) if (value !== undefined) cleanEnv[key] = value
     const front = kernel.spawnTree({
-      cmd: "/usr/bin/osascript",
-      args: ["-e", 'tell application "Google Chrome" to activate'],
+      ...macos.focusChrome,
       cwd: kernel.paths.appData,
       env: cleanEnv,
     })
@@ -1731,7 +1783,7 @@ export const createBrowserEngine = ({
   }
 
   const startSessionTimer = (): void => {
-    if (sessionTimer || discoverBotId) return
+    if (sessionTimer || discoverBotId || localBrowser) return
     sessionTimer = setInterval(() => void saveSessions().catch(() => undefined), SESSION_SAVE_INTERVAL_MS)
     sessionTimer.unref?.()
   }
@@ -1740,9 +1792,10 @@ export const createBrowserEngine = ({
     if (!client) return null
     legacyMigration ??= legacyCookies().catch(() => undefined)
     await legacyMigration
+    // Do not create an empty context that could later replace a locked saved session.
+    const saved = botId === "" ? emptySession() : await loadBotSession(kernel, botId)
     const created = asString(cdpResult(await client.call<unknown>("Target.createBrowserContext", {})).browserContextId)
     if (!created) return null
-    const saved = botId === "" ? emptySession() : await loadBotSession(kernel, botId).catch(() => emptySession())
     savedSessions.set(botId, saved)
     pendingStorage.set(botId, { ...saved.storage })
     contextOwners.set(botId, created)
@@ -1752,14 +1805,14 @@ export const createBrowserEngine = ({
   }
 
   const browserContextFor = (botId: Id | null): Promise<string | null> => {
-    if (discoverBotId) return Promise.resolve("")
+    if (discoverBotId || localBrowser) return Promise.resolve("")
     if (!client) return Promise.resolve(null)
     const key = botId ?? ""
     const existing = browserContexts.get(key)
     if (existing) return existing
-    const created = createContext(key).catch(() => {
+    const created = createContext(key).catch((error) => {
       browserContexts.delete(key)
-      return null
+      throw error
     })
     browserContexts.set(key, created)
     return created
@@ -1811,6 +1864,17 @@ export const createBrowserEngine = ({
     pendingStorage.delete(botId)
     if (client && contextId)
       await client.call("Target.disposeBrowserContext", { browserContextId: contextId }).catch(() => undefined)
+    if (localBrowser) {
+      for (const tab of tabs.filter((tab) => tab.info.ownerBotId === botId && tab.info.state !== "closed")) {
+        if (client && tab.targetId)
+          await client.call("Target.closeTarget", { targetId: tab.targetId }).catch(() => undefined)
+        if (tab.targetId) targetToTab.delete(tab.targetId)
+        tab.targetId = null
+        tab.sessionId = null
+        tab.info.state = "closed"
+        publishTab(tab)
+      }
+    }
   }
 
   const restoreStorage = async (tab: TabState): Promise<void> => {
@@ -1829,6 +1893,36 @@ export const createBrowserEngine = ({
       `(() => { const items = ${JSON.stringify(items)}; for (const [k, v] of Object.entries(items)) { try { if (localStorage.getItem(k) === null) localStorage.setItem(k, v) } catch {} } return true })()`,
       tab.sessionId,
     ).catch(() => null)
+  }
+
+  /** SITE_BLOCKED when the loaded page is a known anti-bot challenge instead of the requested content. */
+  const blockedPageFailure = async (tab: TabState): Promise<OperationFailure | null> => {
+    if (!client || !tab.sessionId) return null
+    const page = await runtimeValue<{
+      href: string
+      title: string
+      text: string
+      frames: Array<string>
+      challengeElements: Array<string>
+    }>(
+      client,
+      `({ href: location.href, title: document.title, text: (document.body && document.body.innerText || '').slice(0, 2000), frames: Array.from(document.querySelectorAll('iframe')).slice(0, 20).map((frame) => frame.src || ''), challengeElements: ${JSON.stringify(CHALLENGE_ELEMENT_IDS)}.filter((id) => document.getElementById(id)) })`,
+      tab.sessionId,
+    ).catch(() => null)
+    if (!page) return null
+    const response =
+      tab.mainDocument && stripHash(tab.mainDocument.url) === stripHash(page.href) ? tab.mainDocument : null
+    const blocked = classifyBlockedPage({
+      url: page.href,
+      title: page.title,
+      text: page.text,
+      frames: page.frames,
+      challengeElements: page.challengeElements,
+      status: response?.status ?? null,
+      headers: response?.headers ?? {},
+    })
+    if (!blocked) return null
+    return failure("SITE_BLOCKED", describeBlockedPage({ blocked, url: page.href }))
   }
 
   type EnsureOptions = { signal?: AbortSignal; budgetMs?: number }
@@ -1883,22 +1977,50 @@ export const createBrowserEngine = ({
     if (tab.info.state === "closed") return failure("TAB_NOT_FOUND", "A aba está fechada. Abra outra com browser_open.")
     if (!(await ensureClient()) || !client)
       return failure("ENGINE_UNAVAILABLE", "O navegador não está disponível. Tente novamente em instantes.")
+    if (localBrowser) options.signal?.throwIfAborted()
     if (tab.sessionId && tab.targetId) {
       if (!isReadableTabUrl(tab.info.url)) return failure("URL_NOT_ALLOWED", BROWSER_URL_NOT_ALLOWED_MESSAGE)
       return success(undefined)
     }
+    if (localBrowser && tab.targetId) {
+      // Reconnect only by the recorded target ID; a matching URL never proves ownership.
+      const knownTarget = tab.targetId
+      const alive = await client
+        .call("Target.getTargetInfo", { targetId: knownTarget })
+        .then(() => true)
+        .catch(() => false)
+      if (alive && (await attach(tab, knownTarget))) return success(undefined)
+      targetToTab.delete(knownTarget)
+      tab.targetId = null
+    }
     const wanted = normalizeBrowserUrl(tab.info.url || "about:blank") ?? "about:blank"
-    const contextId = await browserContextFor(tab.info.ownerBotId)
+    let contextId: string | null
+    try {
+      contextId = await browserContextFor(tab.info.ownerBotId)
+    } catch (error) {
+      return failure(
+        "ENGINE_UNAVAILABLE",
+        error instanceof SessionVaultError
+          ? error.message
+          : "O Chrome não conseguiu isolar a sessão do navegador deste bot.",
+      )
+    }
     if (contextId === null)
       return failure("ENGINE_UNAVAILABLE", "O Chrome não conseguiu isolar a sessão do navegador deste bot.")
     const result = cdpResult(
       await client.call<unknown>("Target.createTarget", {
         url: wanted,
         background: false,
+        ...(localBrowser ? { newWindow: true } : {}),
         ...(contextId === "" ? {} : { browserContextId: contextId }),
       }),
     )
     const targetId = asString(result.targetId)
+    if (localBrowser && targetId) {
+      tab.targetId = targetId
+      targetToTab.set(targetId, tab)
+      store.save(tab)
+    }
     if (!targetId || !(await attach(tab, targetId)))
       return failure("ENGINE_UNAVAILABLE", "O Chrome não conseguiu criar a aba. Tente novamente.")
     return waitForInitialNavigation({ tab, url: wanted, ...options })
@@ -1910,8 +2032,14 @@ export const createBrowserEngine = ({
     tab.sessionId = null
     tab.frameSessions.clear()
     if (client && staleTarget) {
-      const listing = cdpResult(await client.call<unknown>("Target.getTargets", {}))
-      const alive = asArray(listing.targetInfos).some((item) => targetInfo(item)?.targetId === staleTarget)
+      const alive = localBrowser
+        ? await client
+            .call("Target.getTargetInfo", { targetId: staleTarget })
+            .then(() => true)
+            .catch(() => false)
+        : asArray(cdpResult(await client.call<unknown>("Target.getTargets", {})).targetInfos).some(
+            (item) => targetInfo(item)?.targetId === staleTarget,
+          )
       if (alive && (await attach(tab, staleTarget))) {
         tab.generation += 1
         tab.refs.clear()
@@ -2530,14 +2658,20 @@ export const createBrowserEngine = ({
             error: `${live.failure.error} A aba ${tab.info.tabId} continua aberta: use browser_navigate com esse tabId para tentar de novo ou browser_close_tab para descartá-la.`,
           })
         await settle(client as CdpClient, tab, operationSignal)
+        const blocked = await blockedPageFailure(tab)
         recordAction(tab, {
           at: Date.now(),
           tool: "browser_open",
           target: url.slice(0, 500),
-          ok: true,
-          errorCode: null,
-          note: "ok",
+          ok: blocked === null,
+          errorCode: blocked?.failure.errorCode ?? null,
+          note: blocked?.failure.error ?? "ok",
         })
+        if (blocked)
+          return toToolError({
+            ...blocked.failure,
+            error: `${blocked.failure.error} A aba ${tab.info.tabId} continua aberta nessa página.`,
+          })
         const fresh = await makeSnapshot(tab, "auto", operationSignal)
         if (!fresh.success) return toToolError(fresh.failure)
         const content: Array<ToolContent> = [{ type: "text", text: fresh.value.text }]
@@ -2821,7 +2955,9 @@ export const createBrowserEngine = ({
         "NAVIGATION_FAILED",
         describeNavigationFailure({ code: networkErrorCode(started.value), url: kernel.redact(url ?? tab.info.url) }),
       )
-    return awaitPageReady({ tab, url, action, before, endsAt, signal })
+    const ready = await awaitPageReady({ tab, url, action, before, endsAt, signal })
+    if (!ready.success) return ready
+    return (await blockedPageFailure(tab)) ?? ready
   }
 
   const navigate = async ({
@@ -4039,12 +4175,31 @@ export const createBrowserEngine = ({
     sessionTimer = null
     if (contextOwners.size > 0)
       await raceBudget({ work: saveSessions(), ms: SESSION_SHUTDOWN_BUDGET_MS }).catch(() => undefined)
+    if (localBrowser && client) {
+      const current = client
+      await raceBudget({
+        work: Promise.all(
+          tabs
+            .filter((tab) => tab.info.ownerBotId && tab.targetId)
+            .map(async (tab) => {
+              await current.call("Target.closeTarget", { targetId: tab.targetId }).catch(() => undefined)
+              tab.targetId = null
+              tab.sessionId = null
+              tab.info.state = "unloaded"
+              store.save(tab)
+            }),
+        ),
+        ms: SIDE_EFFECT_BUDGET_MS,
+      }).catch(() => undefined)
+    }
     markEngineUnavailable()
     await launcher.stop()
   }
 
   const unsubscribeBotDeleted = kernel.subscribe(({ event }) => {
     if (event.type === "bot.deleted") void disposeBotContext(event.botId)
+    if (event.type === "bot.updated" && (localBrowser ? event.bot.browser !== "local" : event.bot.browser !== "touri"))
+      void disposeBotContext(event.bot.id)
   })
 
   const unhost = kernel.onHostNotification((notification) => {

@@ -1,9 +1,13 @@
 import { randomUUID } from "node:crypto"
 import type { Kernel, MessagePart, ProviderAdapter, Result, RunErrorClass, StartTurnArgs } from "@touri/contracts"
 import { approvalOutcome } from "../../approvals/outcome"
+import { claudeApprovalKind, claudeApprovalPayload } from "../../approvals/payload"
 import { buildChildEnv } from "../../kernel"
+import { redactStructured } from "../../kernel/redact"
+import { commandOutputTail, createCommandOutput } from "../command-output"
 import { spawnFolderProvider, turnFolders } from "../folder-access"
 import { loadTurnImages } from "../loadTurnImages"
+import { withLocalTurnTemp } from "../local-turn-temp"
 import { mcpStartupError, touriMcpStartupFailed } from "../mcp-startup"
 import { applyProviderPrivacy, cliTelemetryOff } from "../privacy"
 import { type ChildProcess, readProviderStderr, startLineReader, writeLine } from "../provider-io"
@@ -19,6 +23,7 @@ const inputText = (input: StartTurnArgs["input"]): string =>
   input.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n")
 
 const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error))
+const shellTool = (name: string): boolean => name === "Bash" || name === "PowerShell"
 
 const partFromContent = (value: unknown): MessagePart | null => {
   const content = asRecord(value)
@@ -68,7 +73,7 @@ const claudeConfig = async ({
 export const createClaudeAdapter = ({
   kernel,
   command,
-  interruptGraceMs = 10_000,
+  interruptGraceMs = 2_000,
 }: {
   kernel: Kernel
   command?: string
@@ -105,7 +110,7 @@ export const createClaudeAdapter = ({
     return { success: true, path: resolved.path, version: stdout.trim().split(/\s+/)[0] ?? "unknown", loggedIn: true }
   }
 
-  const startTurn = async (
+  const startAttempt = async (
     args: StartTurnArgs,
   ): Promise<ReturnType<ProviderAdapter["startTurn"]> extends Promise<infer T> ? T : never> => {
     const env = args.execution ? { ...args.env } : buildChildEnv({ base: process.env, overrides: args.env })
@@ -171,6 +176,7 @@ export const createClaudeAdapter = ({
       commandArgs.push("--effort", args.bot.reasoningEffort === "xhigh" ? "max" : args.bot.reasoningEffort)
     const projectDataDir = env.TOURI_PROJECT_DATA_DIR
     if (projectDataDir) commandArgs.push("--add-dir", projectDataDir)
+    if (!args.execution && env.TMPDIR) commandArgs.push("--add-dir", env.TMPDIR)
     for (const folder of turnFolders(args)) commandArgs.push("--add-dir", folder.path)
     const spawned = spawnFolderProvider(kernel, args, {
       cmd: resolved.path,
@@ -186,16 +192,38 @@ export const createClaudeAdapter = ({
       }
     children.add(spawned)
     void spawned.exited.then(() => children.delete(spawned))
-    if (!args.execution) trackProviderProcess(kernel, spawned)
+    if (!args.execution) await trackProviderProcess(kernel, spawned)
     let completed = false
     let stopped = false
     const toolCalls = new Map<string, Extract<MessagePart, { type: "tool_call" }>>()
+    const outputs = new Map<
+      string,
+      { stream: ReturnType<typeof createCommandOutput>; length: number; suffix: string }
+    >()
     const streamedTools = new Map<number, { callId: string; json: string }>()
     const emitTool = (part: Extract<MessagePart, { type: "tool_call" }>): void => {
-      toolCalls.set(part.callId, part)
-      args.onEvent({ type: "item", part })
+      const previous = toolCalls.get(part.callId)
+      const next = {
+        ...previous,
+        ...part,
+        ...(shellTool(part.tool)
+          ? {
+              startedAt: previous?.startedAt ?? Date.now(),
+              outputMode: part.outputMode ?? previous?.outputMode ?? "on_completion",
+            }
+          : {}),
+      } satisfies Extract<MessagePart, { type: "tool_call" }>
+      toolCalls.set(part.callId, next)
+      args.onEvent({ type: "item", part: next })
     }
     let sawText = false
+    const thinkingBlocks = new Map<number, string>()
+    let estimatedThinkingTokens = 0
+    const emitThinking = (index: number, text: string): void => {
+      if (!text) return
+      thinkingBlocks.set(index, (thinkingBlocks.get(index) ?? "") + text)
+      args.onEvent({ type: "reasoning_delta", itemId: `thinking-${index}`, delta: text })
+    }
     let turnStarted = false
     let finish: (
       result:
@@ -255,11 +283,46 @@ export const createClaudeAdapter = ({
             args.onEvent({ type: "turn_started", externalTurnId: `claude-turn-${sessionId}` })
           }
         }
+      } else if (type === "tool_progress" || type === "progress") {
+        const data = asRecord(frame.data) ?? frame
+        const callId = stringValue(frame.parentToolUseID) ?? stringValue(frame.tool_use_id)
+        const call = callId ? toolCalls.get(callId) : null
+        if (call && shellTool(call.tool) && call.ok === null) {
+          const snapshot = stringValue(data.fullOutput)
+          const partial = stringValue(data.output)
+          if (snapshot !== null || partial !== null) {
+            const output = outputs.get(call.callId) ?? {
+              stream: createCommandOutput(kernel.redact),
+              length: 0,
+              suffix: "",
+            }
+            // Native progress carries cumulative fullOutput; output alone is a tail snapshot too.
+            const text = snapshot ?? partial ?? ""
+            if (
+              snapshot === null ||
+              text.length < output.length ||
+              text.slice(output.length - output.suffix.length, output.length) !== output.suffix
+            ) {
+              output.stream = createCommandOutput(kernel.redact)
+              output.length = 0
+            }
+            const delta = text.slice(output.length)
+            output.length = text.length
+            output.suffix = commandOutputTail(text)
+            outputs.set(call.callId, output)
+            emitTool({ ...call, outputMode: "streaming", outputTail: output.stream.append(delta) })
+          }
+        }
       } else if (type === "stream_event") {
         const event = asRecord(frame.event) ?? {}
         const delta = asRecord(event.delta)
         const index = typeof event.index === "number" ? event.index : 0
         if (event.type === "content_block_start") {
+          const content = asRecord(event.content_block)
+          if (content?.type === "thinking") {
+            args.onEvent({ type: "reasoning_progress", estimatedTokens: estimatedThinkingTokens })
+            emitThinking(index, stringValue(content.thinking) ?? "")
+          }
           const part = partFromContent(event.content_block)
           if (part?.type === "tool_call") {
             streamedTools.set(index, { callId: part.callId, json: "" })
@@ -283,13 +346,29 @@ export const createClaudeAdapter = ({
             args.onEvent({ type: "text_delta", itemId: stringValue(frame.index) ?? "assistant", delta: text })
           }
         }
+        if (event.type === "content_block_delta" && delta?.type === "thinking_delta") {
+          // Print mode can hide thinking text while still streaming token estimates.
+          const tokens = delta.estimated_tokens
+          if (typeof tokens === "number" && Number.isFinite(tokens) && tokens > 0) {
+            estimatedThinkingTokens += tokens
+            args.onEvent({ type: "reasoning_progress", estimatedTokens: estimatedThinkingTokens })
+          }
+          emitThinking(index, stringValue(delta.thinking) ?? "")
+        }
       } else if (type === "assistant") {
         const message = asRecord(frame.message) ?? {}
         const content = Array.isArray(message.content) ? message.content : []
-        for (const item of content) {
+        for (const [index, item] of content.entries()) {
+          const block = asRecord(item)
+          if (block?.type === "thinking") {
+            const text = stringValue(block.thinking) ?? ""
+            const streamed = thinkingBlocks.get(index) ?? ""
+            if (text.startsWith(streamed)) emitThinking(index, text.slice(streamed.length))
+          }
           const part = partFromContent(item)
           if (part?.type === "tool_call") emitTool({ ...toolCalls.get(part.callId), ...part })
         }
+        thinkingBlocks.clear()
       } else if (type === "user") {
         const content = asRecord(frame.message)?.content
         for (const value of Array.isArray(content) ? content : []) {
@@ -300,13 +379,16 @@ export const createClaudeAdapter = ({
           if (call)
             emitTool({
               ...call,
+              ...(outputs.has(callId) ? { outputTail: outputs.get(callId)?.stream.flush() ?? "" } : {}),
               outputJson: typeof result.content === "string" ? result.content : JSON.stringify(result.content ?? null),
               ok: result.is_error !== true,
             })
+          outputs.delete(callId)
         }
       } else if (type === "approval_request") {
         const approvalId = stringValue(frame.approval_id) ?? stringValue(frame.id) ?? `claude-approval-${randomUUID()}`
         const toolUseId = stringValue(frame.tool_use_id) ?? approvalId
+        const toolName = stringValue(frame.tool_name) ?? "Bash"
         approvals.set(approvalId, { child: spawned, toolUseId })
         args.onEvent({
           type: "approval_request",
@@ -314,9 +396,14 @@ export const createClaudeAdapter = ({
           part: {
             type: "approval",
             approvalId,
-            request: "command",
-            scope: { source: "claude", tool: stringValue(frame.tool_name) ?? "Bash" },
-            detail: JSON.stringify(frame.input ?? {}),
+            request: claudeApprovalKind(toolName),
+            scope: { source: "claude", tool: toolName },
+            detail: JSON.stringify(
+              redactStructured(
+                claudeApprovalPayload(frame.input ?? {}, args.fingerprint.cwd, stringValue(frame.reason)),
+                kernel.redact,
+              ),
+            ),
             decision: "pending",
           },
         })
@@ -377,26 +464,35 @@ export const createClaudeAdapter = ({
           error: `Claude exited (${signal ?? code ?? "unknown"})`,
         })
     })
+    let finishCancellation: () => void = () => undefined
+    const cancellationDeadline = new Promise<string>((resolve) => {
+      finishCancellation = () => resolve("")
+    })
     const abort = (): void => {
-      if (completed) return
+      if (stopped) return
       stopped = true
-      void writeLine({
-        stdin: spawned.stdin,
-        value: { type: "control_request", request_id: randomUUID(), request: { subtype: "interrupt" } },
-      })
-      const killTimer = setTimeout(() => spawned.kill("SIGKILL"), interruptGraceMs)
-      void onExit.finally(() => clearTimeout(killTimer))
+      spawned.kill("SIGINT")
+      const killTimer = setTimeout(() => {
+        spawned.kill("SIGKILL")
+        complete({ success: false, errorCode: "canceled", error: "Turno cancelado" })
+        finishCancellation()
+      }, interruptGraceMs)
+      // A tool may keep stderr open after the provider leader exits.
+      void Promise.all([onExit, stderrPromise]).finally(() => clearTimeout(killTimer))
     }
     args.signal.addEventListener("abort", abort, { once: true })
+    if (args.signal.aborted) abort()
     const output = await resultPromise
+    const stderr = await Promise.race([stderrPromise, cancellationDeadline])
     args.signal.removeEventListener("abort", abort)
-    const stderr = await stderrPromise
     if (mcpError) return { success: false, errorCode: "cli_protocol", error: mcpError }
     if (!completed && classifyProviderError(stderr) === "cli_auth")
       return { success: false, errorCode: "cli_auth", error: kernel.redact(stderr.trim()) }
     if (!completed) spawned.kill("SIGTERM")
     return output
   }
+
+  const startTurn: ProviderAdapter["startTurn"] = (args) => withLocalTurnTemp(kernel, args, startAttempt)
 
   const answerApproval = async ({
     approvalId,

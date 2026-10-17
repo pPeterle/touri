@@ -1,7 +1,8 @@
 import type { Bot } from "@touri/contracts"
-import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react"
+import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import type { UiApi } from "../api/client"
 import { ApiError } from "../errors"
+import { t } from "../i18n"
 import { useSaveNotice } from "../useSaveNotice"
 import type { EvidenceImage } from "./evidenceMarkdown"
 import { loadImage, thumbnailBlob } from "./imageLoads"
@@ -23,7 +24,7 @@ const inlineImage = (src: string): Blob | null => {
   const bytes = Uint8Array.from(atob(match[2] ?? ""), (c) => c.charCodeAt(0))
   return new Blob([bytes], { type: match[1] || "image/png" })
 }
-const readImage = async (image: EvidenceImage, context: EvidenceContextValue | null): Promise<Blob> => {
+export const readImage = async (image: EvidenceImage, context: EvidenceContextValue | null): Promise<Blob> => {
   if (image.src) return inlineImage(image.src) ?? (await fetch(image.src)).blob()
   if (!context) throw new Error("Imagem indisponível")
   const attachmentId = /^\/(?:api\/v1\/)?attachments\/([a-f0-9]{64})$/i.exec(image.path)?.[1]
@@ -40,11 +41,13 @@ const Thumbnail = ({
   index,
   open,
   context,
+  inline,
 }: {
   image: EvidenceImage
   index: number
   open: () => void
   context: EvidenceContextValue | null
+  inline: boolean
 }) => {
   const root = useRef<HTMLElement>(null)
   const [visible, setVisible] = useState(false)
@@ -97,6 +100,27 @@ const Thumbnail = ({
       alive = false
     }
   }, [image, context, visible, revision])
+  useEffect(() => {
+    if (!inline || src || !context) return
+    return context.api.subscribe(({ event }) => {
+      if (event.type === "run.updated" && event.run.botId === context.bot.id && event.run.finishedAt)
+        setRevision((value) => value + 1)
+    })
+  }, [inline, src, context])
+  if (inline && !src)
+    return (
+      <span ref={root}>
+        {image.filename}
+        {error.startsWith("Imagem disponível") && (
+          <span role="status">
+            {error}{" "}
+            <button type="button" onClick={() => context?.onComputer?.()}>
+              Abrir Computador
+            </button>
+          </span>
+        )}
+      </span>
+    )
   return (
     <figure ref={root} className="evidence-image">
       <button
@@ -133,13 +157,13 @@ const Thumbnail = ({
           {error.startsWith("Imagem disponível") ? "Abrir Computador" : "Tentar novamente"}
         </button>
       )}
-      {image.src && (
+      {(image.src || src) && (
         <button
           type="button"
           className="text-button"
           onClick={() => void saveImage(() => readImage(image, context), image.filename)}
         >
-          Baixar imagem
+          {t("Baixar imagem")}
         </button>
       )}
       {notice && <p role="status">{notice}</p>}
@@ -147,7 +171,7 @@ const Thumbnail = ({
   )
 }
 
-export const EvidenceGallery = ({ images }: { images: EvidenceImage[] }) => {
+export const EvidenceGallery = ({ images, inline = false }: { images: EvidenceImage[]; inline?: boolean }) => {
   const context = useContext(EvidenceContext)
   const [selected, setSelected] = useState<number | null>(null)
   const identity = JSON.stringify(images)
@@ -157,7 +181,14 @@ export const EvidenceGallery = ({ images }: { images: EvidenceImage[] }) => {
     <>
       <section className="evidence-gallery" aria-label="Imagens de evidência">
         {items.map((image, index) => (
-          <Thumbnail key={image.path} image={image} index={index} context={context} open={() => setSelected(index)} />
+          <Thumbnail
+            key={image.path}
+            image={image}
+            index={index}
+            context={context}
+            inline={inline}
+            open={() => setSelected(index)}
+          />
         ))}
       </section>
       {selected !== null && (
@@ -191,10 +222,34 @@ export const ImageLightbox = ({
   const [src, setSrc] = useState<string | null>(null)
   const [error, setError] = useState("")
   const [zoom, setZoom] = useState(1)
+  const stage = useRef<HTMLDivElement>(null)
+  const [available, setAvailable] = useState({ width: 0, height: 0 })
+  const [natural, setNatural] = useState({ width: 0, height: 0 })
   const [pan, setPan] = useState({ x: 0, y: 0 })
   const drag = useRef<{ x: number; y: number } | null>(null)
   const { notice, saveImage } = useSaveNotice()
   const image = images[index]
+  const fit =
+    natural.width > 0 && natural.height > 0 && available.width > 0 && available.height > 0
+      ? Math.min(available.width / natural.width, available.height / natural.height)
+      : 1
+  const changeZoom = (step: number) => {
+    const next = Math.min(5, Math.max(0.1, zoom + step))
+    setZoom(next)
+    if (next <= 1) setPan({ x: 0, y: 0 })
+  }
+  useLayoutEffect(() => {
+    const element = stage.current
+    if (!element || !src) return
+    const measure = () => {
+      const { width, height } = element.getBoundingClientRect()
+      setAvailable({ width, height })
+    }
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [src])
   useEffect(() => {
     const element = dialog.current
     element?.showModal()
@@ -224,6 +279,7 @@ export const ImageLightbox = ({
     setSrc(null)
     setError("")
     setZoom(1)
+    setNatural({ width: 0, height: 0 })
     setPan({ x: 0, y: 0 })
     if (image)
       void loadImage(async () => {
@@ -267,10 +323,10 @@ export const ImageLightbox = ({
         <button type="button" disabled={images.length < 2} onClick={() => select((index + 1) % images.length)}>
           Próxima
         </button>
-        <button type="button" onClick={() => setZoom((value) => Math.max(1, value - 0.5))}>
+        <button type="button" onClick={() => changeZoom(-0.5)}>
           Diminuir zoom
         </button>
-        <button type="button" onClick={() => setZoom((value) => Math.min(5, value + 0.5))}>
+        <button type="button" onClick={() => changeZoom(0.5)}>
           Aumentar zoom
         </button>
         <button
@@ -311,8 +367,9 @@ export const ImageLightbox = ({
         </p>
       ) : src ? (
         <div
+          ref={stage}
           className="evidence-stage"
-          onWheel={(event) => setZoom((value) => Math.min(5, Math.max(1, value + (event.deltaY < 0 ? 0.25 : -0.25))))}
+          onWheel={(event) => changeZoom(event.deltaY < 0 ? 0.25 : -0.25)}
           onPointerDown={(event) => {
             event.currentTarget.setPointerCapture(event.pointerId)
             drag.current = { x: event.clientX - pan.x, y: event.clientY - pan.y }
@@ -332,7 +389,11 @@ export const ImageLightbox = ({
             draggable={false}
             src={src}
             alt={image.caption}
-            style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}
+            onLoad={(event) => {
+              const { naturalWidth: width, naturalHeight: height } = event.currentTarget
+              setNatural({ width, height })
+            }}
+            style={{ transform: `translate(-50%, -50%) translate(${pan.x}px, ${pan.y}px) scale(${fit * zoom})` }}
           />
         </div>
       ) : (

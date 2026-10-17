@@ -79,15 +79,10 @@ export const IntegrationsScreen = ({ api, botId, botName, onConfigure, modalOpen
                         {server ? "Configurado" : "Não conectado"}
                       </span>
                     </div>
-                    <p>
-                      {preset.title === "Gmail"
-                        ? "Leia e organize e-mails com a conta que você autorizar."
-                        : "Disponibilize apenas as pastas que você escolher."}
-                    </p>
+                    <p>{preset.description}</p>
                     <details>
                       <summary>Como conectar</summary>
                       <p>{preset.guidance}</p>
-                      {preset.setup && <code>{preset.setup}</code>}
                       <a href={preset.docs} target="_blank" rel="noreferrer">
                         Instruções do servidor {preset.title} ↗
                       </a>
@@ -597,7 +592,9 @@ export const PreviewScreen = ({
                 description={
                   project
                     ? "Inicie um processo com porta HTTP para visualizar o projeto."
-                    : "Conecte um projeto para este bot."
+                    : t(
+                        "Para usar o Preview, conecte a pasta do aplicativo como projeto e inicie um processo HTTP deste bot. Você pode pedir ao bot para preparar isso; a conexão exige sua aprovação.",
+                      )
                 }
               >
                 {!project && (

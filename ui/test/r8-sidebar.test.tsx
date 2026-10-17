@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest"
 import App from "../src/App"
 import { createMockApi } from "../src/api/mock"
 import { pendingNotifications, relativeThreadDate } from "../src/sidebarAttention"
+import { openRoutines } from "./workspaceNavigation"
 
 const localDate = (day: number, hour = 12): number => new Date(2026, 9, day, hour).getTime()
 
@@ -65,12 +66,13 @@ it("keeps bots reachable beside global screens, footer integrations and creation
   render(<App kernel={{ services: { api } }} />)
   await screen.findByRole("textbox", { name: "Mensagem para mark" })
   const sidebar = screen.getByRole("navigation", { name: "Barra lateral" })
-  fireEvent.click(within(sidebar).getByRole("button", { name: "touri" }))
-  expect(await screen.findByRole("heading", { name: "Cron" })).toBeVisible()
+  openRoutines()
+  expect(await screen.findByRole("heading", { name: "Rotinas" })).toBeVisible()
   expect(sidebar.querySelectorAll(".bot-entry")).toHaveLength(api.getState().bots.length)
   fireEvent.click(sidebar.querySelector('[data-bot-id="bot-onb"]')?.closest("button") as HTMLElement)
   expect(await screen.findByRole("textbox", { name: "Mensagem para onb" })).toBeVisible()
-  fireEvent.click(within(sidebar).getByRole("button", { name: "Conectar aplicativos" }))
+  fireEvent.click(within(sidebar).getByRole("button", { name: "Avançado", exact: true }))
+  fireEvent.click(within(sidebar).getByRole("button", { name: "Integrações", exact: true }))
   expect(await screen.findByRole("heading", { name: "Integrações" })).toBeVisible()
   fireEvent.click(within(sidebar).getByRole("button", { name: "Criar bot" }))
   expect(screen.getByRole("dialog", { name: "Criar um bot" })).toBeVisible()
@@ -127,7 +129,9 @@ it("opening a failure clears row and bell attention persistently, while keeping 
   await screen.findByRole("textbox", { name: "Mensagem para onb" })
   fireEvent.click(screen.getByRole("button", { name: "Notificações" }))
   expect(
-    within(screen.getByRole("region", { name: "Central de notificações" })).getByText("Falha recente"),
+    within(screen.getByRole("region", { name: "Central de notificações" })).getByText(
+      "Não foi possível concluir esta ação. Confira os detalhes do erro.",
+    ),
   ).toBeVisible()
 })
 
@@ -152,7 +156,7 @@ it("shows chronological notifications and leaves a superseded failure out of the
   )
   expect(rows[0]).toHaveTextContent("Conclusão recente")
   expect(rows[1]).toHaveTextContent("Pergunta pendente")
-  expect(rows[2]).toHaveTextContent("Falha histórica")
+  expect(rows[2]).toHaveTextContent("Não foi possível concluir esta ação. Confira os detalhes do erro.")
   expect(screen.queryByRole("button", { name: "Abrir falha de onb" })).toBeNull()
 })
 

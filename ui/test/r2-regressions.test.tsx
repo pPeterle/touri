@@ -8,6 +8,7 @@ import { ChatPanel, VirtualMessageList } from "../src/components/ChatPanel"
 import { BotCreateModal, BotSettingsModal, ProjectModal } from "../src/components/Modals"
 import { dictionaries, t } from "../src/i18n"
 import { useWorkspace } from "../src/useWorkspace"
+import { openRoutines } from "./workspaceNavigation"
 
 // REST serialization matters: callers must not mutate the server's arrays by reference.
 const fixtureApi = (deferEvents = false) => {
@@ -69,6 +70,7 @@ const run = (trigger: Run["trigger"], status: Run["status"]): Run => ({
   usage: null,
   queuedAt: 1,
   startedAt: 1,
+  providerStartedAt: Date.now(),
   finishedAt: status === "running" ? null : 2,
 })
 const thread: Thread = {
@@ -125,16 +127,16 @@ describe("r2 regressions", () => {
     await screen.findByRole("textbox", { name: "Mensagem para mark" })
     fireEvent.click(screen.getByRole("button", { name: /onb.*Operations/ }))
     await screen.findByRole("textbox", { name: "Mensagem para onb" })
-    fireEvent.click(screen.getByRole("button", { name: "touri" }))
+    openRoutines("onb")
     fireEvent.click(screen.getByRole("button", { name: "Pausadas" }))
     const count = mock.calls.filter((call) => call.route === "GET /routines").length
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "Atualizar" })))
     await waitFor(() => expect(mock.calls.filter((call) => call.route === "GET /routines").length).toBe(count + 1))
-    expect(screen.getByRole("heading", { name: "Cron" })).toBeVisible()
+    expect(screen.getByRole("heading", { name: "Rotinas" })).toBeVisible()
     expect(screen.getByRole("button", { name: "Pausadas" })).toHaveClass("active")
-    fireEvent.click(screen.getByRole("button", { name: /Criar cron/ }))
+    fireEvent.click(screen.getByRole("button", { name: /Criar rotina/ }))
     expect(screen.getByLabelText("Bot")).toHaveValue("bot-onb")
-    fireEvent.click(screen.getByRole("button", { name: "Fechar" }))
+    fireEvent.click(screen.getByRole("button", { name: "Cancelar" }))
     fireEvent.click(screen.getByRole("button", { name: /^Bots/ }))
     expect(screen.getByRole("textbox", { name: "Mensagem para onb" })).toBeVisible()
   })
@@ -264,6 +266,8 @@ describe("r2 regressions", () => {
     await api.request("PATCH /bots/:id", { projectId: null }, { id: "bot-mark" })
     render(<App kernel={{ services: { api } }} />)
     await screen.findByRole("textbox", { name: "Mensagem para mark" })
+    if (!screen.queryByRole("button", { name: "Preview do projeto" }))
+      fireEvent.click(screen.getByRole("button", { name: "Painel do bot" }))
     fireEvent.click(screen.getByRole("button", { name: "Preview do projeto" }))
     expect(screen.getAllByText("Nenhum projeto para mark").length).toBeGreaterThan(0)
     expect(document.body.textContent).not.toMatch(
@@ -329,10 +333,9 @@ describe("r2 regressions", () => {
     const onCreate = vi.fn(async (_input: ApiRoutes["POST /bots"]["req"]) => undefined)
     const modal = render(<BotCreateModal onCreate={onCreate} onClose={() => undefined} />)
     fireEvent.change(screen.getByLabelText("Nome"), { target: { value: "seo" } })
-    fireEvent.click(screen.getByRole("button", { name: "Continuar" }))
+    fireEvent.click(screen.getByRole("button", { name: "Avançado" }))
     fireEvent.change(screen.getByLabelText("Função"), { target: { value: "SEO do site" } })
     fireEvent.change(screen.getByLabelText("Título (opcional)"), { target: { value: "Analista" } })
-    for (let step = 1; step < 4; step++) fireEvent.click(screen.getByRole("button", { name: "Continuar" }))
     fireEvent.click(screen.getByRole("button", { name: "Criar bot" }))
     await waitFor(() =>
       expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({ roleLine: "SEO do site", title: "Analista" })),
@@ -350,8 +353,8 @@ describe("r2 regressions", () => {
         onClose={() => undefined}
       />,
     )
-    expect(screen.getByLabelText("Função")).toHaveValue("SEO do site")
-    fireEvent.change(screen.getByLabelText("Função"), { target: { value: "Touri · Coder" } })
+    expect(screen.getByLabelText("O que ele faz")).toHaveValue("SEO do site")
+    fireEvent.change(screen.getByLabelText("O que ele faz"), { target: { value: "Touri · Coder" } })
     fireEvent.click(screen.getByRole("button", { name: "Salvar configurações" }))
     await waitFor(() =>
       expect(update).toHaveBeenCalledWith(
@@ -379,7 +382,7 @@ describe("r2 regressions", () => {
         onOpenTools={() => undefined}
       />,
     )
-    expect(screen.getByText("Escrevendo…")).toBeVisible()
+    expect(screen.getByText("Trabalhando…")).toBeVisible()
     expect(document.querySelector(".run-card")).toBeNull()
     view.rerender(
       <ChatPanel
@@ -461,3 +464,60 @@ it("P2: normalizes duplicate IDs in a REST snapshot", async () => {
   expect(hook.result.current.data.bots).toHaveLength(3)
   expect(hook.result.current.data.threads).toHaveLength(2)
 })
+
+it.each(["queued", "starting"] as const)(
+  "keeps the provider-start phase after a late %s acceptance snapshot",
+  async (status) => {
+    const fixture = fixtureApi()
+    let release: ((value: ApiRoutes["POST /threads/:id/messages"]["res"]) => void) | undefined
+    const request: ApiRequest = async (route, input, path) => {
+      if (route === "POST /threads/:id/messages")
+        return (await new Promise<ApiRoutes["POST /threads/:id/messages"]["res"]>((resolve) => {
+          release = resolve
+        })) as ApiRoutes[typeof route]["res"]
+      return fixture.api.request(route, input, path)
+    }
+    const api: UiApi = { ...fixture.api, request }
+    const hook = renderHook(() => useWorkspace(api))
+    await waitFor(() => expect(hook.result.current.data.loading).toBe(false))
+    const thread = hook.result.current.data.threads.find((row) => row.id === hook.result.current.data.selectedThreadId)
+    if (!thread?.botId) throw new Error("Missing selected conversation")
+    const started: Run = {
+      ...run("user", "starting"),
+      id: "phase-run",
+      threadId: thread.id,
+      botId: thread.botId,
+      requestMessageId: "phase-request",
+      providerStartedAt: Date.now(),
+      finishedAt: null,
+    }
+    let sending: Promise<void> | undefined
+    act(() => {
+      sending = hook.result.current.actions.sendMessage("Organize minhas notas.")
+    })
+    await waitFor(() => expect(release).toBeDefined())
+    act(() => fixture.mock.emit({ type: "run.updated", run: started }))
+    expect(hook.result.current.data.runs.find((row) => row.id === started.id)?.providerStartedAt).toBe(
+      started.providerStartedAt,
+    )
+    const stale: Run = { ...started, status }
+    delete stale.providerStartedAt
+    await act(async () => {
+      release?.({
+        message: {
+          ...message([]),
+          id: "phase-request",
+          threadId: thread.id,
+          role: "user",
+          text: "Organize minhas notas.",
+        },
+        run: stale,
+      })
+      await sending
+    })
+    expect(hook.result.current.data.runs.find((row) => row.id === started.id)?.providerStartedAt).toBe(
+      started.providerStartedAt,
+    )
+    expect(hook.result.current.data.runs.find((row) => row.id === started.id)?.status).toBe("starting")
+  },
+)

@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs"
-import { createConnection } from "node:net"
-import { isAbsolute, join, relative, resolve } from "node:path"
+import { createConnection, type Socket } from "node:net"
+import { isAbsolute, relative, resolve } from "node:path"
 import type { SidecarModule } from "@touri/contracts"
 import { createKernel, type KernelRuntime } from "./kernel"
 import { acquireRuntimeLock, watchParent } from "./kernel/lifecycle"
@@ -8,6 +8,7 @@ import { createAppPaths } from "./kernel/paths"
 import { safeThreadId } from "./mcp/auth"
 import { registerShim } from "./mcp/shim-registry"
 import { type McpShimStage, mcpStartupFailureLine } from "./mcp/startup-stage"
+import { connectionOptions, resolveMcpEndpoint } from "./platform/transport"
 
 const STDIN_EOF_GRACE_MS = 1_000
 
@@ -45,10 +46,12 @@ const isContained = ({ root, candidate }: { root: string; candidate: string }): 
 
 export const initModules = async (runtime: KernelRuntime): Promise<void> => {
   for (const module of moduleLoaders) {
+    const started = performance.now()
     const imported = await module.load().then(
       (value: unknown) => ({ ok: true as const, value }),
       (error: unknown) => ({ ok: false as const, error }),
     )
+    const loadedAt = performance.now()
     if (!imported.ok) {
       runtime.kernel.log({
         level: "info",
@@ -65,13 +68,22 @@ export const initModules = async (runtime: KernelRuntime): Promise<void> => {
     }
     try {
       await loaded.init(runtime.kernel)
-      runtime.kernel.log({ level: "info", module: "main", msg: `initialized module ${module.path}` })
+      runtime.kernel.log({
+        level: "info",
+        module: "main",
+        msg: `initialized module ${module.path}`,
+        data: { loadMs: Math.round(loadedAt - started), initMs: Math.round(performance.now() - loadedAt) },
+      })
     } catch (error) {
       runtime.kernel.log({
         level: "error",
         module: "main",
         msg: `module init failed ${module.path}`,
-        data: { error: error instanceof Error ? error.message : String(error) },
+        data: {
+          error: error instanceof Error ? error.message : String(error),
+          loadMs: Math.round(loadedAt - started),
+          initMs: Math.round(performance.now() - loadedAt),
+        },
       })
     }
   }
@@ -115,6 +127,51 @@ const runServe = async (): Promise<void> => {
   if (!stopping) process.stdout.write(`${JSON.stringify(runtime.handshake)}\n`)
 }
 
+/** Some provider CLIs discard child stderr. Return a protocol error to their initialize request too. */
+const rejectMcpInitialize = (stage: McpShimStage): Promise<void> => {
+  const message = mcpStartupFailureLine({ stage })
+  process.stderr.write(`${message}\n`)
+  process.exitCode = 1
+  return new Promise((resolve) => {
+    let buffer = ""
+    const finish = (id?: string | number): void => {
+      clearTimeout(timer)
+      process.stdin.off("data", onData)
+      process.stdin.off("end", onEnd)
+      process.stdin.off("error", onEnd)
+      process.stdin.pause()
+      if (id === undefined) resolve()
+      else
+        process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32603, message } })}\n`, () =>
+          resolve(),
+        )
+    }
+    const onEnd = (): void => finish()
+    const onData = (chunk: Buffer): void => {
+      buffer += chunk.toString("utf8")
+      if (buffer.length > 65_536) {
+        finish()
+        return
+      }
+      if (!buffer.includes("\n")) return
+      try {
+        const frame = JSON.parse(buffer.slice(0, buffer.indexOf("\n")))
+        finish(
+          frame?.method === "initialize" && (typeof frame.id === "string" || typeof frame.id === "number")
+            ? frame.id
+            : undefined,
+        )
+      } catch {
+        finish()
+      }
+    }
+    const timer = setTimeout(onEnd, 1000)
+    process.stdin.on("data", onData)
+    process.stdin.once("end", onEnd)
+    process.stdin.once("error", onEnd)
+  })
+}
+
 export const runMcpStdio = ({ threadId, appData }: { threadId: string; appData?: string }): Promise<void> => {
   if (!safeThreadId(threadId)) {
     process.stderr.write("Invalid MCP thread id\n")
@@ -132,31 +189,39 @@ export const runMcpStdio = ({ threadId, appData }: { threadId: string; appData?:
   let token: string
   try {
     token = readFileSync(tokenPath, "utf8").trim()
-  } catch (error) {
-    process.stderr.write(`Unable to read MCP token: ${error instanceof Error ? error.message : String(error)}\n`)
-    process.exitCode = 1
-    return Promise.resolve()
+    if (!token) throw new Error("Empty MCP token")
+  } catch {
+    return rejectMcpInitialize("token_unavailable")
   }
-  const socketPath = process.env.TOURI_MCP_SOCK ?? join(paths.runDir, "mcp.sock")
-  const unregister = registerShim({ runDir: paths.runDir, thread: threadId })
+  let socket: Socket
+  try {
+    const socketPath = process.env.TOURI_MCP_SOCK ?? resolveMcpEndpoint(paths)
+    socket = createConnection(connectionOptions(socketPath))
+  } catch {
+    return rejectMcpInitialize("socket_error")
+  }
+  // Registration probes `ps` in the background so it never delays the MCP handshake.
+  const registration = registerShim({ runDir: paths.runDir, thread: threadId })
   return new Promise((resolve) => {
-    const socket = createConnection(socketPath)
     const state = { answered: false, finished: false }
     let stopWatching: () => void = () => undefined
     const finish = (reason: McpShimStage): void => {
       if (state.finished) return
       state.finished = true
-      if (!state.answered) process.stderr.write(`${mcpStartupFailureLine({ stage: reason })}\n`)
+      const rejected = !state.answered && reason === "socket_error" ? rejectMcpInitialize(reason) : Promise.resolve()
+      if (!state.answered && reason !== "socket_error")
+        process.stderr.write(`${mcpStartupFailureLine({ stage: reason })}\n`)
       stopWatching()
-      unregister()
       socket.destroy()
-      process.stdout.write("", () => resolve())
+      // The caller exits right after; drop this shim's record first.
+      void Promise.all([rejected, registration.then((unregister) => unregister())]).finally(() =>
+        process.stdout.write("", () => resolve()),
+      )
     }
     const onStdinEnd = (): void => {
       setTimeout(() => finish("stdin_closed"), STDIN_EOF_GRACE_MS).unref()
     }
-    socket.once("error", (error) => {
-      process.stderr.write(`MCP socket error: ${error.message}\n`)
+    socket.once("error", () => {
       process.exitCode = 1
       finish("socket_error")
     })

@@ -17,9 +17,9 @@ import { delegatedBot } from "../groups/security"
 import { buildChildEnv } from "../kernel"
 import { atomicAppendFile, atomicWriteFile, ensurePrivateDirectory, removePrivateFile } from "../kernel/files"
 import { backoffDelay, debounce, sleep } from "../kernel/policy"
+import { projectSandboxCommand } from "../platform/project-sandbox"
 import { surfaceUncertainEffects } from "../runtime/work-notice"
 import { createWorkState, type WorkEffect, type WorkObservation, type WorkState } from "../runtime/work-state"
-import { darwinSandboxProfile } from "./darwinSandboxProfile"
 import { runCommand } from "./git"
 import { processOwner, saveProcessOwner } from "./ownership"
 import { processCwd } from "./paths"
@@ -334,7 +334,7 @@ export const createSupervisor = ({
       process.previewBases ??= new Map()
       process.previewBases.set(port, base)
       if (process.spec.vmBotId && !forwarded) return
-      const response = await fetch(`${base}/`, { signal: controller.signal })
+      const response = await fetch(`${base}/`, { signal: controller.signal, redirect: "manual" })
       if (response.status >= 100 && response.status <= 599) {
         process.previewPorts.add(port)
         kernel.publish({
@@ -763,33 +763,10 @@ export const createSupervisor = ({
         Object.entries({ ...environment.env, TMPDIR: temporary }).filter(([name]) => !/^(?:LD_|DYLD_)/i.test(name)),
       )
       const roots = [project.path, bot.homeDir, project.dataDir, temporary]
-      const linuxSandbox =
-        globalThis.process.platform === "linux" ? Bun.which("bwrap", { PATH: "/usr/bin:/bin" }) : null
-      if (globalThis.process.platform === "darwin" && existsSync("/usr/bin/sandbox-exec")) {
-        const profile = darwinSandboxProfile({ roots })
-        localSpawn = { ...localSpawn, cmd: "/usr/bin/sandbox-exec", args: ["-p", profile, shell, "-c", command] }
-      } else if (linuxSandbox) {
-        localSpawn = {
-          ...localSpawn,
-          cmd: linuxSandbox,
-          args: [
-            "--die-with-parent",
-            "--unshare-pid",
-            "--ro-bind",
-            "/",
-            "/",
-            "--dev",
-            "/dev",
-            "--proc",
-            "/proc",
-            ...roots.filter(existsSync).flatMap((root) => ["--bind", root, root]),
-            "--",
-            shell,
-            "-c",
-            command,
-          ],
-        }
-      } else return errorResult("DENIED", "O sandbox local está indisponível. Execute este processo na máquina do bot.")
+      const sandbox = projectSandboxCommand({ roots, shell, command })
+      if (!sandbox)
+        return errorResult("DENIED", "O sandbox local está indisponível. Execute este processo na máquina do bot.")
+      localSpawn = { ...localSpawn, ...sandbox }
     }
     const guestPidFile = `/workspace/.touri/run/process-${spec.id}.pid`
     const effectId = kernel.newId()
@@ -1034,35 +1011,42 @@ export const createSupervisor = ({
   }
 
   const openPreview = ({
+    botId,
     project,
     port,
     processName,
     path,
     vmBotId,
   }: Parameters<Supervisor["openPreview"]>[0]): ProjectResult<{ preview: PreviewTarget }> => {
-    if (!path.startsWith("/") || path.startsWith("//"))
+    if (!path.startsWith("/") || path.startsWith("//") || /[\\\s]/.test(path))
       return errorResult("INVALID_ARGS", "Preview path must be local and start with /")
-    const candidates = processName
-      ? [...managed.values()].filter(
-          (process) =>
-            process.spec.projectId === project.id &&
-            process.spec.name === processName &&
-            (vmBotId === undefined || (process.spec.vmBotId ?? null) === vmBotId),
-        )
-      : [...managed.values()].filter(
-          (process) =>
-            process.spec.projectId === project.id &&
-            (vmBotId === undefined || (process.spec.vmBotId ?? null) === vmBotId),
-        )
+    const candidates = [...managed.values()].filter(
+      (process) =>
+        process.spec.projectId === project.id &&
+        (processName === undefined || process.spec.name === processName) &&
+        (vmBotId === undefined || (process.spec.vmBotId ?? null) === vmBotId) &&
+        (botId === undefined || (process.spec.vmBotId ?? processOwner(kernel, process.spec.id)?.botId) === botId),
+    )
     const candidate =
       port === undefined
         ? candidates.find((process) => process.ports.some((item) => process.previewPorts.has(item.port)))
         : candidates.find((process) =>
-            process.ports.some((item) => item.port === port || process.hostPorts?.get(item.port) === port),
+            process.ports.some(
+              (item) =>
+                process.previewPorts.has(item.port) &&
+                (item.port === port || process.hostPorts?.get(item.port) === port),
+            ),
           )
-    const selectedPort = port ?? candidate?.ports.find((item) => candidate.previewPorts.has(item.port))?.port
+    const selectedPort = candidate?.ports.find(
+      (item) =>
+        candidate.previewPorts.has(item.port) &&
+        (port === undefined || item.port === port || candidate.hostPorts?.get(item.port) === port),
+    )?.port
     if (!candidate || selectedPort === undefined)
-      return errorResult("PREVIEW_NOT_FOUND", "No HTTP preview is available for that process")
+      return errorResult(
+        "PREVIEW_NOT_FOUND",
+        "Nenhum Preview foi criado. Use process_define/process_start para iniciar um processo HTTP deste bot no projeto vinculado, aguarde a porta HTTP ficar disponível e tente preview_open novamente. Servidores iniciados pelo terminal e processos de outros bots não podem ser usados.",
+      )
     const hostPort = candidate.hostPorts?.get(selectedPort) ?? selectedPort
     const preview: PreviewTarget = {
       vmBotId: candidate.spec.vmBotId ?? null,
@@ -1078,7 +1062,7 @@ export const createSupervisor = ({
 
   const stopGroup = async ({ pgid, cwd }: { pgid: number; cwd: string }): Promise<void> => {
     if (pgid <= 0) return
-    await runCommand({ kernel, cmd: "kill", args: ["-TERM", `-${pgid}`], cwd })
+    await runCommand({ kernel, cmd: "kill", args: ["-TERM", "--", `-${pgid}`], cwd })
     await wait(100)
     let groupAlive = false
     try {
@@ -1087,7 +1071,7 @@ export const createSupervisor = ({
     } catch {
       groupAlive = false
     }
-    if (groupAlive) await runCommand({ kernel, cmd: "kill", args: ["-KILL", `-${pgid}`], cwd })
+    if (groupAlive) await runCommand({ kernel, cmd: "kill", args: ["-KILL", "--", `-${pgid}`], cwd })
   }
 
   const cleanupOrphans = async (): Promise<void> => {

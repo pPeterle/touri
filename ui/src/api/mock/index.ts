@@ -7,6 +7,7 @@ import type {
   GroupInput,
   Id,
   ImportReport,
+  McpServer,
   Message,
   NotificationRecord,
   ProcessRunState,
@@ -21,6 +22,7 @@ import type {
 } from "@touri/contracts"
 import { toolCatalog } from "@touri/contracts"
 import { avatarColorFor, avatarShapeFor } from "@touri/contracts/avatar"
+import rootPackage from "../../../../package.json"
 import seedJson from "../../../../sidecar/test/fixtures/ui-seed.json"
 import type { ApiRequest, UiApi } from "../client"
 
@@ -68,6 +70,7 @@ const createBot = (input: Seed["bots"][number], index: number, projectId: Id | n
   homeDir: `/Users/demo/Library/Application Support/touri/bots/${input.id}`,
   mainThreadId: null,
   browserEnabled: true,
+  browser: "touri",
   computerUse: false,
   machine: "local",
   machineIdleMinutes: 10,
@@ -479,6 +482,14 @@ export const createMockApi = ({ scenario }: { scenario?: MockScenario | null } =
     }
     if (key === "GET /bots/:id/grants") return { grants: [] } as ApiRoutes[typeof route]["res"]
     if (key === "GET /bots/:id/mcp") return { servers: [] } as ApiRoutes[typeof route]["res"]
+    if (key === "GET /bots/:id/mcp/prerequisites")
+      return {
+        prerequisites: { machine: "local", status: "checked", node: true, oauthKeys: true, credentials: true },
+      } as ApiRoutes[typeof route]["res"]
+    if (key === "POST /bots/:id/mcp/test" || key === "PUT /bots/:id/mcp/:name")
+      return {
+        server: { ...(input as McpServer), tools: [{ name: "sample_tool", description: "Ferramenta de exemplo" }] },
+      } as ApiRoutes[typeof route]["res"]
     if (key === "GET /provider-profiles") return { profiles: [] } as ApiRoutes[typeof route]["res"]
     if (key === "GET /providers/opencode/models")
       return {
@@ -507,13 +518,25 @@ export const createMockApi = ({ scenario }: { scenario?: MockScenario | null } =
       } as unknown as ApiRoutes[typeof route]["res"]
     }
     if (key === "GET /bots/:id/provider-login/flow" || key === "POST /bots/:id/provider-login/flow")
-      return { provider: (input as { provider: string }).provider, state: "ready" } as ApiRoutes[typeof route]["res"]
+      return {
+        provider: (input as { provider: string }).provider,
+        state: "ready",
+        executable: "available",
+        host: "server",
+      } as ApiRoutes[typeof route]["res"]
     if (key === "GET /bots/:id/provider-login")
       return {
         provider: "claude",
         ready: false,
         source: "missing",
         message: "Login não conectado nesta máquina.",
+      } as ApiRoutes[typeof route]["res"]
+    if (key === "GET /health")
+      return {
+        ok: true,
+        version: rootPackage.version,
+        schemaVersion: 1,
+        host: "server",
       } as ApiRoutes[typeof route]["res"]
     if (key === "POST /ui/errors") return { ok: true } as ApiRoutes[typeof route]["res"]
     if (key === "POST /computer/kill") return { revoked: 1 } as ApiRoutes[typeof route]["res"]
@@ -692,6 +715,67 @@ export const createMockApi = ({ scenario }: { scenario?: MockScenario | null } =
       emit({ type: "thread.updated", thread })
       return { thread } as ApiRoutes[typeof route]["res"]
     }
+    if (key === "GET /workspace/activity") {
+      const visible = threads.filter((thread) => !thread.groupThreadId && !thread.archivedAt)
+      const selected = new Set<Message>()
+      for (const thread of visible) {
+        const rows = messages.filter((message) => message.threadId === thread.id)
+        const latest = [...rows].sort((a, b) => b.createdAt - a.createdAt)
+        for (const row of [
+          latest.find(
+            (message) =>
+              message.text.trim() || message.parts.some((part) => part.type === "approval" || part.type === "notice"),
+          ),
+          latest.find((message) => message.role === "assistant"),
+          [...rows].sort((a, b) => b.updatedAt - a.updatedAt).find((message) => message.role === "assistant"),
+          [...rows]
+            .sort((a, b) => b.updatedAt - a.updatedAt)
+            .find((message) => message.role === "assistant" && message.status !== "streaming"),
+          [...rows]
+            .sort((a, b) => b.updatedAt - a.updatedAt)
+            .find((message) => message.role === "assistant" && message.status === "complete"),
+          ...rows.filter((message) => message.parts.some((part) => part.type === "approval")),
+        ])
+          if (row) selected.add(row)
+      }
+      const latestRuns = visible.flatMap((thread) => {
+        const rows = [...runs.values()]
+          .filter((run) => run.threadId === thread.id)
+          .sort((a, b) => b.queuedAt - a.queuedAt)
+        return rows.filter((run, index) => index === 0 || ["queued", "starting", "running"].includes(run.status))
+      })
+      return {
+        messages: [...selected].map((message) => ({
+          ...structuredClone(message),
+          text: message.text.slice(0, 512),
+          parts: message.parts.filter((part) => part.type === "approval" || part.type === "notice"),
+        })),
+        runs: latestRuns,
+      } as ApiRoutes[typeof route]["res"]
+    }
+    if (key === "GET /search") {
+      const query = input as ApiRoutes["GET /search"]["req"]
+      const tokens = query.q.toLocaleLowerCase().trim().split(/\s+/u)
+      return {
+        hits: messages
+          .filter((message) => {
+            const thread = threads.find((thread) => thread.id === message.threadId)
+            return (
+              thread &&
+              !thread.groupThreadId &&
+              (!query.botId || thread.botId === query.botId) &&
+              tokens.every((token) => message.text.toLocaleLowerCase().includes(token))
+            )
+          })
+          .slice(-50)
+          .reverse()
+          .map((message) => ({
+            threadId: message.threadId,
+            messageId: message.id,
+            snippet: message.text.slice(0, 512),
+          })),
+      } as ApiRoutes[typeof route]["res"]
+    }
     if (key === "GET /bots") return { bots } as ApiRoutes[typeof route]["res"]
     if (key === "POST /bots") {
       const botInput = input as ApiRoutes["POST /bots"]["req"]
@@ -852,6 +936,7 @@ export const createMockApi = ({ scenario }: { scenario?: MockScenario | null } =
     }
     if (key === "GET /routines")
       return {
+        host: "mac",
         routines: routines.filter(
           (routine) =>
             !input || !(input as { botId?: string }).botId || routine.botId === (input as { botId?: string }).botId,
@@ -889,6 +974,13 @@ export const createMockApi = ({ scenario }: { scenario?: MockScenario | null } =
       emit({ type: "routine.updated", routine, lastRun: null })
       return { routine } as ApiRoutes[typeof route]["res"]
     }
+    if (key === "DELETE /routines/:id") {
+      const index = routines.findIndex((routine) => routine.id === pathValues.id)
+      if (index < 0) throw new Error("routine not found")
+      routines.splice(index, 1)
+      emit({ type: "routine.deleted", routineId: pathValues.id ?? "" })
+      return {} as ApiRoutes[typeof route]["res"]
+    }
     if (key === "POST /routines/:id/run") {
       const routine = routines.find((candidate) => candidate.id === pathValues.id)
       if (!routine) throw new Error("routine not found")
@@ -910,13 +1002,28 @@ export const createMockApi = ({ scenario }: { scenario?: MockScenario | null } =
     }
     if (key === "GET /mcp/tools")
       return {
-        server: { name: "touri", version: "0.1.0" },
+        server: { name: "touri", version: rootPackage.version },
         tools: toolCatalog.tools.map((tool) => ({
           name: tool.name,
           description: tool.description,
           group: tool["x-touri"].group,
         })),
       } as ApiRoutes[typeof route]["res"]
+    if (key === "GET /folders") {
+      const path = (input as ApiRoutes["GET /folders"]["req"]).path ?? "/workspace"
+      return {
+        canGrant: true,
+        home: "/workspace",
+        path,
+        parent: path === "/" ? null : path.slice(0, path.lastIndexOf("/")) || "/",
+        folders: [],
+        truncated: false,
+      } as ApiRoutes[typeof route]["res"]
+    }
+    if (key === "POST /folders") {
+      const folder = input as ApiRoutes["POST /folders"]["req"]
+      return { path: `${folder.path}/${folder.name}` } as ApiRoutes[typeof route]["res"]
+    }
     if (key === "GET /projects") return { projects } as ApiRoutes[typeof route]["res"]
     if (key === "GET /projects/discover") return { repositories: [] } as ApiRoutes[typeof route]["res"]
     if (key === "POST /projects") {

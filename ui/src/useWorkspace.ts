@@ -22,13 +22,22 @@ import type {
   UiEvent,
   UiEventEnvelope,
 } from "@touri/contracts"
+import { isApprovalNoticeTitle } from "@touri/contracts/approval-summary"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { UiApi } from "./api/client"
-import { reconcileApprovalMessages, reconcileApprovalNotifications } from "./approvalState"
+import {
+  countPendingRequests,
+  reconcileApprovalMessages,
+  reconcileApprovalNotifications,
+  uniqueApprovalNotifications,
+} from "./approvalState"
 import { userFacingError } from "./errors"
+import { adoptProviderLogin } from "./features/bots/providerLogin"
 import { useDoctorReport } from "./features/doctor/useDoctorReport"
 import { localizeNotice, t } from "./i18n"
+import { localResponseTimings } from "./localResponseTimings"
 import { useMachineParking } from "./machineIntents"
+import { reconcileFailureNotifications } from "./sidebarAttention"
 import { readWorkspaceState, saveWorkspaceState } from "./workspaceState"
 
 type ProcessEntry = { spec: ProcessSpec; run: ProcessRunState | null }
@@ -40,11 +49,13 @@ export type WorkspaceData = {
   machines: Array<MachineState>
   threads: Array<Thread>
   messages: Array<Message>
+  activityMessages: Array<Message>
   runs: Array<Run>
   projects: Array<Project>
   processes: Array<ProcessEntry>
   previews: Array<PreviewTarget>
   browserTabs: Array<BrowserTabInfo & { ownerBotId: Id | null }>
+  routineHost: "mac" | "server"
   routines: Array<Routine>
   routineRuns: Array<RoutineRun>
   doctor: DoctorReport | null
@@ -57,6 +68,7 @@ export type WorkspaceData = {
   notice: string | null
   importProgress: { phase: string; done: number; total: number } | null
   computerGrantRequest: { threadId: Id } | null
+  pendingRequestsOnReturn: number | null
   notifications: Array<NotificationRecord>
 }
 
@@ -75,11 +87,12 @@ export type WorkspaceActions = {
   updateBot: (botId: Id, patch: Partial<ApiRoutes["PATCH /bots/:id"]["req"]>) => Promise<void>
   deleteBot: (botId: Id, name: string, deleteVolumes: boolean) => Promise<void>
   machineAction: (botId: Id, reset: boolean, projectId?: Id | null, stopTurns?: boolean) => Promise<void>
-  createBot: (input: ApiRoutes["POST /bots"]["req"], loginDraftId?: string) => Promise<void>
+  createBot: (input: ApiRoutes["POST /bots"]["req"], loginDraftId?: string) => Promise<{ loginReady: boolean }>
   toggleRoutine: (routine: Routine) => Promise<void>
   runRoutine: (routineId: Id) => Promise<void>
-  createRoutine: (input: ApiRoutes["POST /routines"]["req"]) => Promise<void>
-  updateRoutine: (routineId: Id, patch: ApiRoutes["PATCH /routines/:id"]["req"]) => Promise<void>
+  createRoutine: (input: ApiRoutes["POST /routines"]["req"]) => Promise<Routine>
+  deleteRoutine: (routineId: Id) => Promise<void>
+  updateRoutine: (routineId: Id, patch: ApiRoutes["PATCH /routines/:id"]["req"]) => Promise<Routine>
   createProject: (input: ApiRoutes["POST /projects"]["req"]) => Promise<Project>
   createProcess: (
     projectId: Id,
@@ -113,11 +126,13 @@ const emptyState = (): WorkspaceData => ({
   machines: [],
   threads: [],
   messages: [],
+  activityMessages: [],
   runs: [],
   projects: [],
   processes: [],
   previews: [],
   browserTabs: [],
+  routineHost: "server",
   routines: [],
   routineRuns: [],
   doctor: null,
@@ -131,6 +146,7 @@ const emptyState = (): WorkspaceData => ({
   importProgress: null,
   computerGrantRequest: null,
   notifications: [],
+  pendingRequestsOnReturn: null,
 })
 
 const uniqueById = <T extends { id: Id }>(rows: Array<T>): Array<T> => {
@@ -141,13 +157,22 @@ const uniqueById = <T extends { id: Id }>(rows: Array<T>): Array<T> => {
   return [...result.values()]
 }
 
-const mergeRunRows = <T extends { id: Id; status: string; finishedAt: number | null }>(
+const mergeRunRows = <
+  T extends { id: Id; status: string; finishedAt: number | null; providerStartedAt?: number | null },
+>(
   current: T[],
   incoming: T[],
 ): T[] => {
   const rows = new Map(current.map((row) => [row.id, row]))
   for (const row of incoming) {
     const previous = rows.get(row.id)
+    // A late acceptance can predate provider invocation.
+    if (
+      previous?.providerStartedAt != null &&
+      row.providerStartedAt == null &&
+      ["queued", "starting"].includes(row.status)
+    )
+      continue
     // A REST response may arrive after the terminal WebSocket event.
     if (
       previous?.finishedAt !== null &&
@@ -260,6 +285,7 @@ const withoutBot = (data: WorkspaceData, botId: Id): WorkspaceData => {
       ? (threads.find((thread) => thread.botId === selectedBotId)?.id ?? null)
       : data.selectedThreadId,
     messages: data.messages.filter((message) => !threadIds.has(message.threadId)),
+    activityMessages: data.activityMessages.filter((message) => !threadIds.has(message.threadId)),
     runs: data.runs.filter((run) => run.botId !== botId),
     routines: data.routines.filter((routine) => !routineIds.has(routine.id)),
     routineRuns: data.routineRuns.filter((run) => !routineIds.has(run.routineId)),
@@ -281,7 +307,8 @@ const upsertNotification = (list: Array<NotificationRecord>, next: NotificationR
         item.id === next.id ? (item.resolvedAt !== null && next.resolvedAt === null ? item : next) : item,
       )
     : [next, ...list]
-  return merged.slice(0, MAX_NOTIFICATIONS)
+  // Snapshot merge order is not age: retain the newest server IDs at the history limit.
+  return merged.sort((a, b) => b.id - a.id).slice(0, MAX_NOTIFICATIONS)
 }
 
 const errorMessage = userFacingError
@@ -302,13 +329,27 @@ const lastActiveThread = (threads: Thread[], runs: Run[], botId: Id, rememberedI
 }
 
 export const useWorkspace = (api: UiApi, enabled = true): Workspace => {
-  const createdLoginDrafts = useRef(new Map<string, Bot>())
   const diagnosis = useDoctorReport(api, enabled)
   const [data, setData] = useState<WorkspaceData>(emptyState)
+  const currentData = useRef(data)
+  currentData.current = data
   useMachineParking(api, data.bots, enabled && !data.loading)
   const privateThreads = useRef(new Set<string>())
   const threadsByBot = useRef(readWorkspaceState().threadsByBot ?? {})
   const generation = useRef(0)
+  const runRevision = useRef(0)
+  const liveRuns = useRef(new Map<Id, number>())
+  const loadedThreads = useRef(new Map<Id, number>())
+  const threadLoads = useRef(
+    new Map<
+      Id,
+      {
+        attempt: number
+        promise: Promise<void>
+        deltas: Array<Extract<UiEvent, { type: "message.delta" }>>
+      }
+    >(),
+  )
   const projectGeneration = useRef(0)
   const [projectRevision, setProjectRevision] = useState(0)
   useEffect(() => {
@@ -348,9 +389,46 @@ export const useWorkspace = (api: UiApi, enabled = true): Workspace => {
     [api],
   )
 
+  const loadThread = useCallback(
+    (threadId: Id, force = false): Promise<void> => {
+      const attempt = generation.current
+      const pending = threadLoads.current.get(threadId)
+      if (pending?.attempt === attempt) return pending.promise
+      if (!force && loadedThreads.current.get(threadId) === attempt) return Promise.resolve()
+      const deltas: Array<Extract<UiEvent, { type: "message.delta" }>> = []
+      const promise = Promise.all([
+        api.request("GET /threads/:id/messages", { all: true }, { id: threadId }),
+        api.request("GET /threads/:id/runs", { all: true }, { id: threadId }),
+      ])
+        .then(([messages, runs]) => {
+          if (attempt !== generation.current) return
+          loadedThreads.current.set(threadId, attempt)
+          setData((current) => ({
+            ...current,
+            messages: deltas.reduce(
+              (rows, event) => applyDelta(rows, event.messageId, event.delta, event.partIndex, event.offset, event),
+              messages.messages.reduce(updateMessage, current.messages),
+            ),
+            runs: mergeRunRows(current.runs, runs.runs),
+          }))
+        })
+        .catch((error: unknown) => {
+          if (attempt === generation.current)
+            setData((current) => ({ ...current, notice: t("Service request failed", { error: errorMessage(error) }) }))
+        })
+        .finally(() => {
+          if (threadLoads.current.get(threadId)?.promise === promise) threadLoads.current.delete(threadId)
+        })
+      threadLoads.current.set(threadId, { attempt, promise, deltas })
+      return promise
+    },
+    [api],
+  )
+
   const load = useCallback(async (): Promise<void> => {
     if (!enabled) return
     const attempt = ++generation.current
+    const runsAtStart = runRevision.current
     try {
       const [
         groupResponse,
@@ -363,6 +441,7 @@ export const useWorkspace = (api: UiApi, enabled = true): Workspace => {
         routineRunsResponse,
         notificationsResponse,
         machineResponse,
+        activityResponse,
       ] = await Promise.all([
         api.request("GET /groups", {}).catch(() => ({ groups: [] })),
         api.request("GET /bots", {}),
@@ -377,34 +456,36 @@ export const useWorkspace = (api: UiApi, enabled = true): Workspace => {
           capability: { available: false, reason: t("No virtualization on this host"), provider: null },
           machines: [],
         })),
+        api.request("GET /workspace/activity", {}),
       ])
-      const botThreads = await Promise.all(
-        botResponse.bots.map(async (bot) => {
-          const response = await api.request("GET /bots/:id/threads", {}, { id: bot.id })
-          return response.threads
-        }),
-      )
-      const groupThreads = await Promise.all(
-        (groupResponse?.groups ?? []).map((g) => api.request("GET /groups/:id/threads", {}, { id: g.id })),
-      )
+      const [botThreads, groupThreads] = await Promise.all([
+        Promise.all(
+          botResponse.bots.map(async (bot) => {
+            const response = await api.request("GET /bots/:id/threads", {}, { id: bot.id })
+            return response.threads
+          }),
+        ),
+        Promise.all((groupResponse?.groups ?? []).map((g) => api.request("GET /groups/:id/threads", {}, { id: g.id }))),
+      ])
       const allThreads = [...botThreads.flat(), ...groupThreads.flatMap((r) => r.threads)]
-      const threadMessages = await Promise.all(
-        allThreads.map(async (thread) => {
-          const [response, runResponse] = await Promise.all([
-            api.request("GET /threads/:id/messages", { all: true }, { id: thread.id }),
-            api.request("GET /threads/:id/runs", { all: true }, { id: thread.id }),
-          ])
-          return { messages: response.messages, runs: runResponse.runs }
-        }),
-      )
       if (attempt !== generation.current) return
       setData((current) => {
+        const runIds = new Set(activityResponse.runs.map((run) => run.id))
+        const runs = mergeRunRows(
+          current.runs.filter(
+            (run) =>
+              !["queued", "starting", "running"].includes(run.status) ||
+              runIds.has(run.id) ||
+              (liveRuns.current.get(run.id) ?? 0) > runsAtStart,
+          ),
+          activityResponse.runs,
+        )
         const selectedBot = botResponse.bots.find((bot) => bot.id === current.selectedBotId) ?? botResponse.bots[0]
         const selectedThread =
           allThreads.find((thread) => thread.id === current.selectedThreadId && thread.botId === selectedBot?.id) ??
           lastActiveThread(
             allThreads,
-            threadMessages.flatMap((entry) => entry.runs),
+            runs,
             selectedBot?.id ?? "",
             current.selectedThreadId ?? threadsByBot.current[selectedBot?.id ?? ""],
           )
@@ -415,21 +496,17 @@ export const useWorkspace = (api: UiApi, enabled = true): Workspace => {
           machineCapability: machineResponse.capability,
           machines: machineResponse.machines,
           threads: mergeThreads(current.threads, allThreads),
-          messages: [...threadMessages.flatMap((entry) => entry.messages), ...(api.pendingMessages?.() ?? [])].reduce(
-            updateMessage,
-            current.messages,
-          ),
-          runs: mergeRunRows(
-            current.runs,
-            threadMessages.flatMap((entry) => entry.runs),
-          ),
+          messages: (api.pendingMessages?.() ?? []).reduce(updateMessage, current.messages),
+          activityMessages: activityResponse.messages,
+          runs,
           projects: projectResponse.projects,
           previews: previewResponse.previews,
           browserTabs: browserResponse.tabs,
+          routineHost: routinesResponse.host ?? "server",
           routines: uniqueById(routinesResponse.routines),
           routineRuns: uniqueById(routineRunsResponse.routineRuns),
           settings: settingsResponse.settings,
-          notifications: notificationsResponse.notifications,
+          notifications: current.notifications.reduce(upsertNotification, notificationsResponse.notifications),
           selectedBotId: selectedBot?.id ?? null,
           selectedThreadId: selectedThread?.id ?? null,
           activeProjectId: selectedBot?.projectId ?? null,
@@ -438,6 +515,15 @@ export const useWorkspace = (api: UiApi, enabled = true): Workspace => {
         }
       })
       setProjectRevision((value) => value + 1)
+      const selected = currentData.current
+      const threadId = selected.selectedThreadId
+      if (
+        !selected.loading &&
+        threadId &&
+        botResponse.bots.some((bot) => bot.id === selected.selectedBotId) &&
+        allThreads.some((thread) => thread.id === threadId && thread.botId === selected.selectedBotId)
+      )
+        await loadThread(threadId)
     } catch (error) {
       if (attempt !== generation.current) return
       setData((current) => ({
@@ -448,38 +534,23 @@ export const useWorkspace = (api: UiApi, enabled = true): Workspace => {
           : t("Service request failed", { error: errorMessage(error) }),
       }))
     }
-  }, [api, enabled])
+  }, [api, enabled, loadThread])
 
   useEffect(() => {
     if (!enabled) return
-    void load()
+    let active = true
     let resyncing: Promise<void> | null = null
-    let replayDeltas: Array<Extract<UiEvent, { type: "message.delta" }>> = []
     const resync = (): void => {
       if (resyncing) return
-      resyncing = load()
-        .then(() => {
-          const pending = replayDeltas
-          replayDeltas = []
-          if (pending.length)
-            setData((current) => ({
-              ...current,
-              messages: pending.reduce(
-                (messages, event) =>
-                  applyDelta(messages, event.messageId, event.delta, event.partIndex, event.offset, event),
-                current.messages,
-              ),
-            }))
-        })
-        .finally(() => {
-          resyncing = null
-        })
+      resyncing = load().finally(() => {
+        resyncing = null
+      })
     }
-    const unsubscribeConnection = api.subscribeConnection?.((connected) => {
-      if (connected) resync()
-    })
+    // A reconnect needs no reload: the sidecar replays the gap, or sends a resync frame when the gap is
+    // too large or expired. Reloading every conversation on each reconnect kept a slow client behind.
     const unsubscribe = api.subscribe((envelope: UiEventEnvelope) => {
       const event = envelope.event
+      localResponseTimings().observe(event)
       if (event.type === "thread.updated" && event.thread.groupThreadId) {
         privateThreads.current.add(event.thread.id)
         return
@@ -494,7 +565,8 @@ export const useWorkspace = (api: UiApi, enabled = true): Workspace => {
         resync()
         return
       }
-      if (event.type === "message.delta" && resyncing) replayDeltas.push(event)
+      if (event.type === "message.delta") threadLoads.current.get(event.threadId)?.deltas.push(event)
+      if (event.type === "run.updated") liveRuns.current.set(event.run.id, ++runRevision.current)
       setData((current) => {
         if (event.type === "machine.updated")
           return {
@@ -509,6 +581,8 @@ export const useWorkspace = (api: UiApi, enabled = true): Workspace => {
         if (event.type === "thread.updated" && event.thread.groupThreadId) return current
         if (event.type === "bot.updated") return { ...current, bots: uniqueById([...current.bots, event.bot]) }
         if (event.type === "bot.deleted") return withoutBot(current, event.botId)
+        if (event.type === "project.created")
+          return { ...current, projects: uniqueById([...current.projects, event.project]) }
         if (event.type === "browser.tab")
           return {
             ...current,
@@ -539,8 +613,12 @@ export const useWorkspace = (api: UiApi, enabled = true): Workspace => {
           const part = message?.parts[event.partIndex]
           const length = part?.type === "text" || part?.type === "reasoning" ? part.text.length : 0
           if (!message || (event.offset !== undefined && event.offset > length)) {
-            if (!resyncing) replayDeltas.push(event)
-            queueMicrotask(resync)
+            // Unopened threads have no snapshot to repair; selection fetches their current history.
+            if (event.threadId === current.selectedThreadId && !threadLoads.current.has(event.threadId))
+              queueMicrotask(() => {
+                void loadThread(event.threadId, true)
+                threadLoads.current.get(event.threadId)?.deltas.push(event)
+              })
           }
           return {
             ...current,
@@ -548,6 +626,8 @@ export const useWorkspace = (api: UiApi, enabled = true): Workspace => {
           }
         }
         if (event.type === "run.updated") return { ...current, runs: mergeRunRows(current.runs, [event.run]) }
+        if (event.type === "routine.deleted")
+          return { ...current, routines: current.routines.filter((routine) => routine.id !== event.routineId) }
         if (event.type === "routine.updated")
           return {
             ...current,
@@ -577,6 +657,30 @@ export const useWorkspace = (api: UiApi, enabled = true): Workspace => {
           return { ...current, importProgress: { phase: event.phase, done: event.done, total: event.total } }
         if (event.type === "notification.created" || event.type === "notification.resolved")
           return { ...current, notifications: upsertNotification(current.notifications, event.notification) }
+        // Older computer grants open their existing card; their native echo is not an error.
+        if (
+          event.type === "notify" &&
+          (event.title === "Computer use approval" || event.title.endsWith(": Computer use approval")) &&
+          event.threadId
+        )
+          return { ...current, computerGrantRequest: { threadId: event.threadId } }
+        // Approval notifications already have a review action; the headless host
+        // also echoes native notifications as legacy notices.
+        if (
+          event.type === "notify" &&
+          (event.kind === "approval" ||
+            event.requestId ||
+            event.notificationId !== undefined ||
+            isApprovalNoticeTitle(event.title) ||
+            current.notifications.some(
+              (item) =>
+                item.kind === "approval" &&
+                item.threadId === event.threadId &&
+                (item.title === event.title || event.title.endsWith(`: ${item.title}`)) &&
+                item.body === event.body,
+            ))
+        )
+          return current
         if (event.type === "notify")
           return {
             ...current,
@@ -589,12 +693,61 @@ export const useWorkspace = (api: UiApi, enabled = true): Workspace => {
         return current
       })
     })
+    // Browsers can suspend a socket without closing it. Refresh attention on return even when
+    // there was no reconnect frame; never re-send a request or a decision during recovery.
+    let refreshing: Promise<void> | null = null
+    const refreshAttention = (): void => {
+      if (refreshing || currentData.current.loading) return
+      refreshing = Promise.all([api.request("GET /notifications", {}), api.request("GET /workspace/activity", {})])
+        .then(async ([snapshot, activity]) => {
+          if (!active) return
+          setData((current) => {
+            const notifications = current.notifications.reduce(upsertNotification, snapshot.notifications)
+            const messages = reconcileApprovalMessages([...activity.messages, ...current.messages], notifications)
+            return {
+              ...current,
+              notifications,
+              messages: reconcileApprovalMessages(current.messages, notifications, activity.messages),
+              activityMessages: activity.messages,
+              pendingRequestsOnReturn: countPendingRequests(notifications, messages),
+            }
+          })
+          const threadId = currentData.current.selectedThreadId
+          if (threadId) await loadThread(threadId, true)
+        })
+        .catch(() => {
+          /* Keep the last known requests visible until recovery succeeds. */
+        })
+        .finally(() => {
+          refreshing = null
+        })
+    }
+    let wasHidden = document.visibilityState === "hidden"
+    const visibility = (): void => {
+      if (document.visibilityState === "hidden") wasHidden = true
+      else if (wasHidden) {
+        wasHidden = false
+        refreshAttention()
+      }
+    }
+    document.addEventListener("visibilitychange", visibility)
+    window.addEventListener("online", refreshAttention)
+    const unsubscribeConnection = api.subscribeConnection?.((connected) => {
+      if (connected) refreshAttention()
+    })
+    // Subscribe first, then load: the snapshot starts where live delivery does.
+    void (api.cursorReady?.() ?? Promise.resolve()).then(() => {
+      if (active) void load()
+    })
     return () => {
+      active = false
       generation.current += 1
       unsubscribe()
       unsubscribeConnection?.()
+      document.removeEventListener("visibilitychange", visibility)
+      window.removeEventListener("online", refreshAttention)
     }
-  }, [api, enabled, load])
+  }, [api, enabled, load, loadThread])
 
   const selectedBot = useMemo(
     () => data.bots.find((bot) => bot.id === data.selectedBotId) ?? null,
@@ -604,6 +757,30 @@ export const useWorkspace = (api: UiApi, enabled = true): Workspace => {
     () => data.threads.find((thread) => thread.id === data.selectedThreadId) ?? null,
     [data.threads, data.selectedThreadId],
   )
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: refresh and reconnect also refresh the selected transcript
+  useEffect(() => {
+    if (enabled && !data.loading && data.selectedThreadId) void loadThread(data.selectedThreadId)
+  }, [enabled, data.loading, data.selectedThreadId, projectRevision, loadThread])
+
+  // A bot update may precede its project event (or come from an older sidecar).
+  const missingProjectIds = [...new Set(data.bots.map((bot) => bot.projectId))]
+    .filter((id) => id && !data.projects.some((project) => project.id === id))
+    .sort()
+    .join(",")
+  useEffect(() => {
+    if (!enabled || !missingProjectIds) return
+    let active = true
+    void api.request("GET /projects", {}).then(
+      ({ projects }) => {
+        if (active) setData((current) => ({ ...current, projects: uniqueById([...projects, ...current.projects]) }))
+      },
+      () => undefined,
+    )
+    return () => {
+      active = false
+    }
+  }, [api, enabled, missingProjectIds])
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: each REST reload must refresh processes, even when project ID is unchanged
   useEffect(() => {
@@ -690,7 +867,10 @@ export const useWorkspace = (api: UiApi, enabled = true): Workspace => {
   const sendMessage = useCallback(
     async (text: string, parentId?: Id | null, attachmentIds: Array<Id> = []): Promise<void> => {
       if (!selectedThread || !text.trim()) return
+      const clientNonce = crypto.randomUUID()
+      localResponseTimings().begin(selectedThread.id, clientNonce)
       const input = {
+        clientNonce,
         threadId: selectedThread.id,
         parentId: parentId === undefined ? selectedThread.activeLeafId : parentId,
         text: text.trim(),
@@ -699,6 +879,8 @@ export const useWorkspace = (api: UiApi, enabled = true): Workspace => {
       const response = api.sendMessage
         ? await api.sendMessage(input)
         : await api.request("POST /threads/:id/messages", input, { id: selectedThread.id })
+      localResponseTimings().observe({ type: "message.updated", message: response.message })
+      if (response.run) localResponseTimings().observe({ type: "run.updated", run: response.run })
       setData((current) => ({
         ...current,
         messages: updateMessage(current.messages, response.message),
@@ -761,34 +943,27 @@ export const useWorkspace = (api: UiApi, enabled = true): Workspace => {
   )
 
   const createBot = useCallback(
-    async (input: ApiRoutes["POST /bots"]["req"], loginDraftId?: string): Promise<void> => {
-      const created = loginDraftId ? createdLoginDrafts.current.get(loginDraftId) : undefined
-      const response = created ? { bot: created } : await api.request("POST /bots", input)
-      if (loginDraftId) createdLoginDrafts.current.set(loginDraftId, response.bot)
-      if (loginDraftId)
-        await api.request(
-          "POST /bots/:id/provider-login/flow",
-          { provider: input.provider, action: "adopt", draftId: loginDraftId },
-          { id: response.bot.id },
-        )
-      if (loginDraftId) createdLoginDrafts.current.delete(loginDraftId)
+    async (input: ApiRoutes["POST /bots"]["req"], loginDraftId?: string) => {
+      const response = await api.request("POST /bots", input)
+      const [loginReady, threadsResponse] = await Promise.all([
+        loginDraftId
+          ? adoptProviderLogin(api, response.bot, loginDraftId).then(
+              () => true,
+              () => false,
+            )
+          : Promise.resolve(true),
+        api.request("GET /bots/:id/threads", {}, { id: response.bot.id }).catch(() => ({ threads: [] })),
+      ])
       setData((current) => ({
         ...current,
         bots: uniqueById([...current.bots, response.bot]),
         selectedBotId: response.bot.id,
-        selectedThreadId: response.bot.mainThreadId,
+        threads: mergeThreads(current.threads, threadsResponse.threads),
+        selectedThreadId: response.bot.mainThreadId ?? threadsResponse.threads[0]?.id ?? null,
         activeProjectId: response.bot.projectId,
         processes: [],
       }))
-      const threadsResponse = await api.request("GET /bots/:id/threads", {}, { id: response.bot.id })
-      setData((current) => ({
-        ...current,
-        threads: uniqueById([...current.threads, ...threadsResponse.threads]),
-        selectedThreadId:
-          current.selectedBotId === response.bot.id
-            ? (threadsResponse.threads[0]?.id ?? null)
-            : current.selectedThreadId,
-      }))
+      return { loginReady }
     },
     [api],
   )
@@ -816,20 +991,30 @@ export const useWorkspace = (api: UiApi, enabled = true): Workspace => {
   )
 
   const createRoutine = useCallback(
-    async (input: ApiRoutes["POST /routines"]["req"]): Promise<void> => {
+    async (input: ApiRoutes["POST /routines"]["req"]): Promise<Routine> => {
       const response = await api.request("POST /routines", input)
       setData((current) => ({ ...current, routines: uniqueById([...current.routines, response.routine]) }))
+      return response.routine
+    },
+    [api],
+  )
+
+  const deleteRoutine = useCallback(
+    async (routineId: Id): Promise<void> => {
+      await api.request("DELETE /routines/:id", {}, { id: routineId })
+      setData((current) => ({ ...current, routines: current.routines.filter((routine) => routine.id !== routineId) }))
     },
     [api],
   )
 
   const updateRoutine = useCallback(
-    async (routineId: Id, patch: ApiRoutes["PATCH /routines/:id"]["req"]): Promise<void> => {
+    async (routineId: Id, patch: ApiRoutes["PATCH /routines/:id"]["req"]): Promise<Routine> => {
       const response = await api.request("PATCH /routines/:id", patch, { id: routineId })
       setData((current) => ({
         ...current,
         routines: current.routines.map((routine) => (routine.id === routineId ? response.routine : routine)),
       }))
+      return response.routine
     },
     [api],
   )
@@ -1010,20 +1195,45 @@ export const useWorkspace = (api: UiApi, enabled = true): Workspace => {
     [api],
   )
 
+  const activityMessages = useMemo(() => {
+    const rows = new Map(
+      data.activityMessages.map((message) => [JSON.stringify([message.threadId, message.id]), message]),
+    )
+    for (const message of data.messages) {
+      const key = JSON.stringify([message.threadId, message.id])
+      const activity = rows.get(key)
+      if (
+        activity &&
+        ((activity.updatedSeq ?? 0) > (message.updatedSeq ?? 0) ||
+          ((activity.updatedSeq ?? 0) === (message.updatedSeq ?? 0) && activity.updatedAt > message.updatedAt))
+      )
+        continue
+      rows.set(key, message)
+    }
+    return reconcileApprovalMessages([...rows.values()], data.notifications)
+  }, [data.activityMessages, data.messages, data.notifications])
+
   const approvalMessages = useMemo(
     () => reconcileApprovalMessages(data.messages, data.notifications),
     [data.messages, data.notifications],
   )
-  const approvalNotifications = useMemo(
-    () => reconcileApprovalNotifications(data.notifications, data.messages),
-    [data.messages, data.notifications],
+  const notifications = useMemo(
+    () =>
+      reconcileFailureNotifications(
+        uniqueApprovalNotifications(reconcileApprovalNotifications(data.notifications, activityMessages)),
+        data.runs,
+      ),
+    [activityMessages, data.notifications, data.runs],
   )
 
   return {
     data: {
       ...data,
       messages: approvalMessages,
-      notifications: approvalNotifications,
+      activityMessages,
+      notifications,
+      pendingRequestsOnReturn:
+        data.pendingRequestsOnReturn === null ? null : countPendingRequests(notifications, activityMessages),
       doctor: diagnosis.report,
       doctorError: diagnosis.error,
       selectedBotId: selectedBot?.id ?? data.selectedBotId,
@@ -1052,6 +1262,7 @@ export const useWorkspace = (api: UiApi, enabled = true): Workspace => {
       runRoutine,
       createRoutine,
       updateRoutine,
+      deleteRoutine,
       createProject,
       createProcess,
       startProcess,
@@ -1065,7 +1276,7 @@ export const useWorkspace = (api: UiApi, enabled = true): Workspace => {
       respondNotification,
       replyToNotification,
       dismissComputerGrant: () => setData((current) => ({ ...current, computerGrantRequest: null })),
-      dismissNotice: () => setData((current) => ({ ...current, notice: null })),
+      dismissNotice: () => setData((current) => ({ ...current, notice: null, pendingRequestsOnReturn: null })),
     },
   }
 }

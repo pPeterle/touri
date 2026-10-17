@@ -11,20 +11,21 @@ import {
   webEndpoint,
 } from "./api/client"
 import type { ApprovalTarget } from "./approvalNavigation"
+import { ApprovalNotice } from "./components/ApprovalNotice"
 import { AvatarRuntimeProvider } from "./components/AvatarRuntime"
 import { BotAvatar } from "./components/BotAvatar"
 import { BotComputer } from "./components/BotComputer"
 import { BotPanel } from "./components/BotPanel"
-// r8-sidebar: bot list and navigation live in an isolated component.
-import { Sidebar } from "./components/BotSidebar"
 import { ChatPanel } from "./components/ChatPanel"
 import CronScreen from "./components/CronScreen"
 import { ErrorBoundary } from "./components/ErrorBoundary"
+import { ErrorNotice } from "./components/ErrorNotice"
 import { EvidenceContext } from "./components/EvidenceGallery"
 import { FailureActionContext } from "./components/FailureActionContext"
-import { GroupModal } from "./components/Groups"
+import { GroupModal, GroupPanel } from "./components/Groups"
 import {
   BotCreateModal,
+  BotModelModal,
   BotSettingsModal,
   DoctorModal,
   ImportWizard,
@@ -33,11 +34,14 @@ import {
 } from "./components/Modals"
 import { MotionPresence, MotionSkeleton } from "./components/Motion"
 import { PageTransition } from "./components/PageTransition"
+import { RoutineEditor } from "./components/RoutineEditor"
+import { SidebarDrawer } from "./components/SidebarDrawer"
 import { IntegrationsScreen, McpScreen, PreviewScreen } from "./components/WorkspaceScreens"
 import { installComputerKillSwitch } from "./computerKillSwitch"
 import { openComputerWindow } from "./computerWindow"
 import { type DeepLink, parseDeepLink } from "./deepLink"
 import { navigatePage } from "./design/navigation"
+import { errorRecovery, type RecoveryAction } from "./errorRecovery"
 import { ApiError, userFacingError } from "./errors"
 import { CommandPalette } from "./features/commandPalette/CommandPalette"
 import type { PaletteActionId, PaletteCommand } from "./features/commandPalette/paletteItems"
@@ -52,8 +56,11 @@ import { isNewBotShortcut, isPaletteShortcut } from "./features/commandPalette/s
 import { HistoryMigrationStatus } from "./features/history/HistoryMigrationStatus"
 import { ReportErrorButton } from "./features/reports/ReportErrorButton"
 import { ReportMenuLauncher } from "./features/reports/ReportMenuLauncher"
-import { t } from "./i18n"
+import { localizeNotice, t } from "./i18n"
+import { requestTaskResume, requestTaskReview } from "./recoveryEvents"
+import type { RoutineDraft } from "./routineDraft"
 import { isFailureNotice } from "./sidebarAttention"
+import { useHost } from "./useHost"
 import { useWorkspace } from "./useWorkspace"
 import { type AppRoute, readWorkspaceState, saveWorkspaceState } from "./workspaceState"
 
@@ -68,6 +75,7 @@ type ModalKind =
   | "project"
   | "settings"
   | "bot-settings"
+  | "bot-model"
   | "bot-permissions"
   | "bot-mcp"
   | null
@@ -88,6 +96,8 @@ const errorMessage = userFacingError
 
 const AppContent = ({ kernel }: AppProps) => {
   const [api, setApi] = useState<UiApi | null>(() => kernel?.services?.api ?? null)
+  const host = useHost(api)
+  const attachmentButtonRef = useRef<HTMLButtonElement>(null)
   const apiRef = useRef(api)
   apiRef.current = api
   const [invokeCommand] = useState<TauriInvoke>(() => kernel?.services?.invoke ?? createTauriInvoke())
@@ -128,7 +138,8 @@ const AppContent = ({ kernel }: AppProps) => {
     [route],
   )
   useEffect(() => saveWorkspaceState({ route }), [route])
-  const [localNotice, setLocalNotice] = useState<string | null>(null)
+  const [routineDraft, setRoutineDraft] = useState<RoutineDraft | null>(null)
+  const [localNotice, setLocalNotice] = useState<unknown>(null)
   const [searchOpen, setSearchOpen] = useState(false)
   const [notificationsOpen, setNotificationsOpen] = useState(false)
   const unavailableApi = useMemo<UiApi>(
@@ -142,14 +153,11 @@ const AppContent = ({ kernel }: AppProps) => {
     [],
   )
   const activeApi = api ?? unavailableApi
-  useEffect(
-    () => installComputerKillSwitch(activeApi, invokeCommand, (error) => setLocalNotice(userFacingError(error))),
-    [activeApi, invokeCommand],
-  )
+  useEffect(() => installComputerKillSwitch(activeApi, invokeCommand, setLocalNotice), [activeApi, invokeCommand])
   const workspace = useWorkspace(activeApi, api !== null)
   const { data, actions } = workspace
   const section = route.section
-  const touriPage = route.section === "touri" ? route.page : "cron"
+  const advancedPage = route.section === "advanced" ? route.page : null
   const screen = route.section === "bots" ? route.screen : "chat"
   const setScreen = (next: "chat" | "preview"): void => {
     setRoute((current) => (current.section === "bots" ? { ...current, screen: next } : current))
@@ -332,10 +340,31 @@ const AppContent = ({ kernel }: AppProps) => {
     setRoute({ section: "bots", screen: "chat" })
   }
   const notificationActions = {
+    recover: async (item: NotificationRecord, action: RecoveryAction): Promise<void> => {
+      actions.selectLocation({ bot: item.botId, thread: item.threadId })
+      setRoute({ section: "bots", screen: "chat" })
+      if (action === "login") runFailureAction({ kind: "setting", settingId: "providerLogin", label: "" })
+      else if (action === "storage" || action === "doctor") openModal("doctor")
+      else {
+        const run = data.runs
+          .filter(
+            (run) =>
+              run.threadId === item.threadId &&
+              (run.status === "failed" || run.status === "interrupted") &&
+              (run.finishedAt ?? 0) <= item.createdAt + 1000,
+          )
+          .sort((a, b) => (b.finishedAt ?? 0) - (a.finishedAt ?? 0))[0]
+        if (run && action === "retry") await actions.retryRun(run.id)
+        else {
+          if (run) requestTaskReview(run.id)
+          if (action === "resume" && item.threadId) requestTaskResume(item.threadId)
+        }
+      }
+    },
     open: (item: NotificationRecord): void => {
       // r8-sidebar: opening a failure acknowledges it using the existing persisted dismissal.
       if (isFailureNotice(item) && item.resolvedAt === null)
-        void actions.dismissNotification(item.id).catch((error: unknown) => setLocalNotice(userFacingError(error)))
+        void actions.dismissNotification(item.id).catch(setLocalNotice)
       // end r8-sidebar
       if (item.kind === "approval" && item.threadId && item.requestId) {
         reviewApproval({ threadId: item.threadId, approvalId: item.requestId })
@@ -369,7 +398,7 @@ const AppContent = ({ kernel }: AppProps) => {
     ) ?? null
   const botRoutines = data.routines.filter((routine) => routine.botId === selectedBot?.id)
 
-  const panelOpen = selectedBot ? (panelsByBot[selectedBot.id] ?? true) : false
+  const panelOpen = selectedBot ? (panelsByBot[selectedBot.id] ?? false) : false
   const setPanelOpen = useCallback(
     (open: boolean) => {
       if (!selectedBot) return
@@ -404,6 +433,28 @@ const AppContent = ({ kernel }: AppProps) => {
   )
 
   const notice = localNotice ?? data.notice
+  // This completion notice already points to the inline account recovery control.
+  const noticeHasInlineRecovery = notice === t("Bot created. Could not connect your account. Sign in below to chat.")
+  const noticeRecord = data.notifications.find(
+    (item) => typeof notice === "string" && notice.endsWith(localizeNotice(item.body)),
+  )
+  const noticeRun = noticeRecord
+    ? data.runs
+        .filter(
+          (run) =>
+            run.threadId === noticeRecord.threadId &&
+            (run.status === "failed" || run.status === "interrupted") &&
+            (run.finishedAt ?? 0) <= noticeRecord.createdAt + 1000,
+        )
+        .sort((a, b) => (b.finishedAt ?? 0) - (a.finishedAt ?? 0))[0]
+    : undefined
+  const noticeContext = {
+    provider: noticeRun?.provider,
+    errorClass: noticeRun?.errorClass,
+    parts: data.activityMessages.find((message) => message.id === noticeRun?.replyMessageId)?.parts,
+    savedMessage: !!noticeRun?.requestMessageId,
+    occurredAt: noticeRun?.finishedAt ?? noticeRecord?.createdAt,
+  }
   const showNotice = (message: string): void => {
     setLocalNotice(userFacingError(message))
     window.setTimeout(() => setLocalNotice(null), 4200)
@@ -447,9 +498,14 @@ const AppContent = ({ kernel }: AppProps) => {
     }
     openDestination(command.destination)
   }
+  const openBotRoutines = (botId: Id): void => {
+    closeModal()
+    if (botId !== data.selectedBotId) actions.selectBot(botId)
+    setRoute({ section: "advanced", page: "cron", botId })
+  }
   const openDestination = (destination: PaletteDestination): void => {
     if (destination.kind === "page") {
-      setRoute({ section: "touri", page: destination.page })
+      setRoute({ section: "advanced", page: destination.page })
       return
     }
     setSettingFocus(destination.settingId ?? null)
@@ -459,6 +515,10 @@ const AppContent = ({ kernel }: AppProps) => {
       return
     }
     if (destination.kind === "bot-settings") {
+      if (destination.section === "routines" && selectedBot) {
+        openBotRoutines(selectedBot.id)
+        return
+      }
       setBotSettingsSection(destination.section)
       setModal("bot-settings")
       return
@@ -469,10 +529,7 @@ const AppContent = ({ kernel }: AppProps) => {
     if (action.kind === "doctor") openDestination({ kind: "doctor" })
     if (action.kind === "setting") openDestination(destinationForSetting(action.settingId))
   }
-  const paletteSettings = useMemo(
-    () => settingsIndex({ cloudEnabled: data.settings?.cloud === true, hasBot: data.bots.length > 0 }),
-    [data.settings?.cloud, data.bots.length],
-  )
+  const paletteSettings = useMemo(() => settingsIndex({ hasBot: data.bots.length > 0 }), [data.bots.length])
   const startProcess = async (processId: Id): Promise<void> => {
     await actions.startProcess(processId)
     setScreen("preview")
@@ -524,35 +581,80 @@ const AppContent = ({ kernel }: AppProps) => {
     ) : modal === "import" ? (
       <ImportWizard bots={data.bots} api={api} onClose={closeModal} onNotice={showNotice} />
     ) : null
-  const botModal =
-    modal === "bot" ? (
-      <BotCreateModal
-        api={api}
+  // Keep creation mounted when the first bot's live event replaces onboarding with the workspace.
+  const botModal = (
+    <MotionPresence show={modal === "bot"} kind="modal">
+      <ErrorBoundary area="o diálogo" dialog api={api} onClose={closeModal}>
+        {modal === "bot" && (
+          <BotCreateModal
+            api={api}
+            invokeCommand={invokeCommand}
+            cloudEnabled={data.settings?.cloud === true}
+            capability={data.machineCapability}
+            projects={data.projects}
+            onCreateProject={actions.createProject}
+            onClose={closeModal}
+            onCreate={async (input, loginDraftId) => {
+              const { loginReady } = await actions.createBot(input, loginDraftId)
+              setRoute({ section: "bots", screen: "chat" })
+              showNotice(
+                loginReady
+                  ? t("{name} created.", { name: input.name })
+                  : t("Bot created. Could not connect your account. Sign in below to chat."),
+              )
+            }}
+          />
+        )}
+      </ErrorBoundary>
+    </MotionPresence>
+  )
+  const botSettingsModal = (modal === "bot-settings" || modal === "bot-permissions" || modal === "bot-mcp") &&
+    selectedBot && (
+      <BotSettingsModal
         invokeCommand={invokeCommand}
-        cloudEnabled={data.settings?.cloud === true}
+        bots={data.bots}
+        permissionsOnly={modal === "bot-permissions"}
+        focusMcp={modal === "bot-mcp"}
+        {...(!requestedComputer && {
+          onAttachFile: () => {
+            attachmentButtonRef.current?.click()
+            closeModal()
+          },
+          onOpenRoutines: () => openBotRoutines(selectedBot.id),
+          onOpenIntegrations: () => {
+            closeModal()
+            setRoute({ section: "advanced", page: "integracoes" })
+          },
+        })}
+        initialSection={modal === "bot-settings" ? botSettingsSection : undefined}
+        focusSetting={modal === "bot-settings" ? settingFocus : null}
+        activeTurns={data.runs.some(
+          (run) => run.botId === selectedBot.id && ["queued", "starting", "running"].includes(run.status),
+        )}
+        api={api}
         capability={data.machineCapability}
+        machineState={data.machines.find((state) => state.botId === selectedBot.id)}
+        bot={selectedBot}
+        settings={data.settings}
         projects={data.projects}
-        onCreateProject={actions.createProject}
+        routines={botRoutines}
+        actions={actions}
         onClose={closeModal}
-        onCreate={async (input, loginDraftId) => {
-          await actions.createBot(input, loginDraftId)
-          setRoute({ section: "bots", screen: "chat" })
-        }}
       />
-    ) : null
+    )
   if (data.bots.length === 0)
     return (
-      <AvatarRuntimeProvider value={data}>
+      <AvatarRuntimeProvider value={{ ...data, messages: data.activityMessages }}>
+        {botModal}
         <OnboardingLanding
-          doctor={data.doctor}
+          host={host}
           onCreateBot={() => openModal("bot")}
           onDoctor={() => openModal("doctor")}
           onImport={() => openModal("import")}
         />
-        <MotionPresence show={setupModal !== null || botModal !== null} kind="modal">
+        <MotionPresence show={setupModal !== null} kind="modal">
           <ErrorBoundary key={modal} area="o diálogo" dialog api={api} onClose={closeModal}>
             {setupModal}
-            {botModal}
           </ErrorBoundary>
         </MotionPresence>
       </AvatarRuntimeProvider>
@@ -560,30 +662,37 @@ const AppContent = ({ kernel }: AppProps) => {
 
   if (requestedComputer)
     return (
-      <AvatarRuntimeProvider value={data}>
-        <main className="computer-window">
-          <header>
-            <h1>Computador de {selectedBot?.name ?? "bot"}</h1>
-          </header>
-          {selectedBot?.id === requestedComputer ? (
-            <ErrorBoundary key={selectedBot.id} area="o computador" api={api}>
-              <BotComputer
-                autoOpen
-                key={selectedBot.id}
-                api={api}
-                bot={selectedBot}
-                machine={data.machines.find((state) => state.botId === selectedBot.id)}
-              />
-            </ErrorBoundary>
-          ) : (
-            <p role="alert">Bot não encontrado.</p>
-          )}
-        </main>
+      <AvatarRuntimeProvider value={{ ...data, messages: data.activityMessages }}>
+        <FailureActionContext.Provider value={runFailureAction}>
+          <main className="computer-window">
+            <header>
+              <h1>Computador de {selectedBot?.name ?? "bot"}</h1>
+            </header>
+            {selectedBot?.id === requestedComputer ? (
+              <ErrorBoundary key={selectedBot.id} area="o computador" api={api}>
+                <BotComputer
+                  autoOpen
+                  key={selectedBot.id}
+                  api={api}
+                  bot={selectedBot}
+                  machine={data.machines.find((state) => state.botId === selectedBot.id)}
+                  activeTurns={data.runs.some(
+                    (run) => run.botId === selectedBot.id && ["queued", "starting", "running"].includes(run.status),
+                  )}
+                />
+              </ErrorBoundary>
+            ) : (
+              <p role="alert">Bot não encontrado.</p>
+            )}
+          </main>
+          {botSettingsModal}
+        </FailureActionContext.Provider>
       </AvatarRuntimeProvider>
     )
 
   return (
-    <AvatarRuntimeProvider value={data}>
+    <AvatarRuntimeProvider value={{ ...data, messages: data.activityMessages }}>
+      {botModal}
       <main className="app-shell">
         <HistoryMigrationStatus api={api} />
         {connectionState === "error" && (
@@ -593,18 +702,65 @@ const AppContent = ({ kernel }: AppProps) => {
         )}
         {/* r8 motion: transient notice presence */}
         <MotionPresence show={Boolean(notice)} kind="toast">
-          {notice && (
+          {Boolean(notice) && (
             <div className="notice-bar" role="status">
               <span>◈</span>
-              {notice}
-              <button type="button" onClick={actions.dismissNotice} aria-label={t("Dismiss notice")}>
+              {!noticeHasInlineRecovery &&
+              (typeof notice !== "string" ||
+                errorRecovery(notice).classified ||
+                /erro|falh|failed|Error|[{}]/i.test(notice)) ? (
+                <ErrorNotice
+                  error={notice}
+                  context={noticeContext}
+                  onAction={async (action) => {
+                    if (action === "retry") {
+                      if (noticeRecord) {
+                        await notificationActions.recover(noticeRecord, action)
+                        return
+                      }
+                      // A provider notice must not restart the local service or replay a mutation.
+                      await api.request("GET /health", {})
+                      setLocalNotice(null)
+                      actions.dismissNotice()
+                    } else if (action === "login")
+                      runFailureAction({ kind: "setting", settingId: "providerLogin", label: "" })
+                    else if (action === "storage" || action === "doctor") openModal("doctor")
+                    else if (noticeRecord) await notificationActions.recover(noticeRecord, action)
+                    else {
+                      // Without a task identity, refresh recorded state rather than guessing a target.
+                      await api.request("GET /workspace/activity", {})
+                      openModal("doctor")
+                    }
+                  }}
+                />
+              ) : typeof notice === "string" ? (
+                notice
+              ) : null}
+              <button
+                type="button"
+                onClick={() => {
+                  setLocalNotice(null)
+                  actions.dismissNotice()
+                }}
+                aria-label={t("Dismiss notice")}
+              >
                 ×
               </button>
             </div>
           )}
         </MotionPresence>
+        {data.pendingRequestsOnReturn !== null && data.pendingRequestsOnReturn > 0 && (
+          <div className="notice-bar approval-notice" role="status">
+            {t("Você tem {n} solicitações pendentes.", { n: data.pendingRequestsOnReturn })}
+            <button type="button" onClick={actions.dismissNotice} aria-label={t("Dismiss notice")}>
+              ×
+            </button>
+          </div>
+        )}
+        <ApprovalNotice notifications={data.notifications} messages={data.activityMessages} onReview={reviewApproval} />
         <div className="app-grid">
-          <Sidebar
+          <SidebarDrawer
+            host={data.routineHost}
             groups={data.groups}
             onNewGroup={() => {
               setEditingGroup(null)
@@ -621,21 +777,19 @@ const AppContent = ({ kernel }: AppProps) => {
             showFakeTrafficLights={api.isMock}
             bots={data.bots}
             onDeleteBot={actions.deleteBot}
-            routineCount={data.routines.length}
             threads={data.threads}
-            messages={data.messages}
+            messages={data.activityMessages}
             runs={data.runs}
             floatUpdates={data.settings?.sidebarFloatUpdates ?? true}
             selectedBotId={selectedBot?.id ?? null}
             selectedThreadId={selectedThread?.id ?? null}
             section={section}
-            touriPage={touriPage}
-            onSection={(next) => {
-              setRoute(next === "bots" ? { section: "bots", screen: "chat" } : { section: "touri", page: "cron" })
-            }}
-            onTouriPage={(page) => {
-              setRoute({ section: "touri", page })
-            }}
+            advancedPage={advancedPage}
+            onChat={() => setRoute({ section: "bots", screen: "chat" })}
+            onAdvancedPage={(page) => setRoute({ section: "advanced", page })}
+            onRoutines={openBotRoutines}
+            onProject={() => openModal("project")}
+            onImport={() => openModal("import")}
             onSelect={actions.selectBot}
             onSelectThread={actions.selectThread}
             onReviewApproval={reviewApproval}
@@ -674,20 +828,23 @@ const AppContent = ({ kernel }: AppProps) => {
                 onConnectProject={() => openModal("project")}
                 onNotice={showNotice}
               />
-            ) : section === "touri" && touriPage === "cron" ? (
+            ) : section === "advanced" && advancedPage === "cron" ? (
               <CronScreen
+                host={data.routineHost}
+                key={route.section === "advanced" ? (route.botId ?? "all") : "all"}
+                initialBotFilter={route.section === "advanced" ? route.botId : undefined}
                 loading={data.loading}
                 loadError={data.bots.length === 0 ? data.notice : null}
                 bots={data.bots}
                 selectedBotId={data.selectedBotId}
                 routines={data.routines}
                 routineRuns={data.routineRuns}
-                messages={data.messages}
+                messages={data.activityMessages}
                 actions={actions}
                 onReviewApprovals={reviewApproval}
                 onNotice={showNotice}
               />
-            ) : section === "touri" && touriPage === "integracoes" ? (
+            ) : section === "advanced" && advancedPage === "integracoes" ? (
               <IntegrationsScreen
                 api={api}
                 botId={selectedBot?.id ?? null}
@@ -695,7 +852,7 @@ const AppContent = ({ kernel }: AppProps) => {
                 modalOpen={modal !== null}
                 onConfigure={() => openModal("bot-mcp")}
               />
-            ) : section === "touri" && touriPage === "mcp" ? (
+            ) : section === "advanced" && advancedPage === "mcp" ? (
               <McpScreen
                 api={api}
                 botId={selectedBot?.id ?? null}
@@ -707,11 +864,12 @@ const AppContent = ({ kernel }: AppProps) => {
               <FailureActionContext.Provider value={runFailureAction}>
                 <EvidenceContext.Provider value={evidenceContext}>
                   <div
-                    className={`bot-workspace motion-workspace ${panelOpen ? "has-bot-panel" : ""} ${expandedBot === selectedBot?.id ? "computer-expanded" : ""}`}
+                    className={`bot-workspace motion-workspace ${panelOpen ? "has-bot-panel" : ""} ${!selectedGroup && expandedBot === selectedBot?.id ? "computer-expanded" : ""}`}
                     data-motion-panel-open={panelOpen}
                   >
                     <ErrorBoundary key={selectedThread?.id ?? selectedBot?.id ?? "chat"} area="a conversa" api={api}>
                       <ChatPanel
+                        onRepeatTask={setRoutineDraft}
                         group={selectedGroup}
                         groupMembers={groupMembers}
                         onEditGroup={() => {
@@ -750,59 +908,91 @@ const AppContent = ({ kernel }: AppProps) => {
                               request: (value?.request ?? 0) + 1,
                             }))
                         }}
+                        attachmentButtonRef={attachmentButtonRef}
                         onOpenPermissions={() => openModal("bot-permissions")}
+                        onOpenToolCatalog={() => openModal("bot-mcp")}
                         onOpenProviderLogin={() => {
                           setSettingFocus(SETTINGS.providerLogin.id)
                           setBotSettingsSection(SETTINGS.providerLogin.section)
                           setModal("bot-settings")
                         }}
-                        onOpenModel={() => openModal("bot-settings")}
-                        projects={data.projects}
-                        onSelectProject={async (projectId) => {
-                          if (selectedBot) await actions.updateBot(selectedBot.id, { projectId })
-                        }}
-                        onAddProject={() => {
-                          openModal("project")
-                          setProjectLinkBotId(selectedBot?.id ?? null)
-                        }}
                       />
                     </ErrorBoundary>
                     {/* r8 motion: preserve the panel during its inert exit */}
-                    <MotionPresence show={panelOpen && Boolean(selectedBot)} kind="panel">
-                      {selectedBot && (
-                        <ErrorBoundary key={selectedBot.id} area="o painel do bot" api={api}>
-                          <BotPanel
-                            libraryRequest={
-                              libraryRequest?.botId === selectedBot.id ? (libraryRequest ?? undefined) : undefined
-                            }
-                            computerTabRequest={
-                              computerTabRequest?.botId === selectedBot.id ? computerTabRequest.request : 0
-                            }
-                            key={selectedBot.id}
-                            api={api}
-                            groups={data.groups.filter((g) => g.memberIds.includes(selectedBot.id))}
-                            onGroup={(g) => {
-                              const thread = data.threads.find((t) => t.groupId === g.id && !t.groupThreadId)
-                              if (thread) actions.selectThread(thread.id)
-                            }}
-                            bot={selectedBot}
-                            machine={data.machines.find((state) => state.botId === selectedBot.id)}
-                            routines={botRoutines}
-                            paused={modal !== null || searchOpen || notificationsOpen}
-                            expanded={expandedBot === selectedBot.id}
-                            onExpand={() => setExpandedBot((id) => (id === selectedBot.id ? null : selectedBot.id))}
-                            onWindow={() => openComputerWindow(selectedBot.id)}
-                            onClose={() => {
-                              setPanelOpen(false)
-                              window.requestAnimationFrame(() =>
-                                document.querySelector<HTMLButtonElement>(".bot-panel-toggle")?.focus(),
-                              )
-                            }}
-                            onSettings={() => openModal("bot-settings")}
-                            onPermissions={() => openModal("bot-permissions")}
-                            onRole={(roleLine) => actions.updateBot(selectedBot.id, { roleLine })}
-                          />
-                        </ErrorBoundary>
+                    <MotionPresence show={panelOpen && Boolean(selectedGroup || selectedBot)} kind="panel">
+                      {selectedGroup ? (
+                        <GroupPanel
+                          key={selectedGroup.id}
+                          group={selectedGroup}
+                          bots={groupMembers}
+                          onEdit={() => {
+                            setEditingGroup(selectedGroup)
+                            openModal("group")
+                          }}
+                          onClose={() => {
+                            setPanelOpen(false)
+                            window.requestAnimationFrame(() =>
+                              document.querySelector<HTMLButtonElement>(".bot-panel-toggle")?.focus(),
+                            )
+                          }}
+                        />
+                      ) : (
+                        selectedBot && (
+                          <ErrorBoundary key={selectedBot.id} area="o painel do bot" api={api}>
+                            <BotPanel
+                              libraryRequest={
+                                libraryRequest?.botId === selectedBot.id ? (libraryRequest ?? undefined) : undefined
+                              }
+                              computerTabRequest={
+                                computerTabRequest?.botId === selectedBot.id ? computerTabRequest.request : 0
+                              }
+                              key={selectedBot.id}
+                              api={api}
+                              groups={data.groups.filter((g) => g.memberIds.includes(selectedBot.id))}
+                              onGroup={(g) => {
+                                const thread = data.threads.find((t) => t.groupId === g.id && !t.groupThreadId)
+                                if (thread) actions.selectThread(thread.id)
+                              }}
+                              bot={selectedBot}
+                              machine={data.machines.find((state) => state.botId === selectedBot.id)}
+                              routines={botRoutines}
+                              activeTurns={data.runs.some(
+                                (run) =>
+                                  run.botId === selectedBot.id &&
+                                  ["queued", "starting", "running"].includes(run.status),
+                              )}
+                              paused={modal !== null || searchOpen || notificationsOpen}
+                              expanded={expandedBot === selectedBot.id}
+                              onExpand={() => setExpandedBot((id) => (id === selectedBot.id ? null : selectedBot.id))}
+                              onWindow={() => openComputerWindow(selectedBot.id)}
+                              onClose={() => {
+                                setPanelOpen(false)
+                                window.requestAnimationFrame(() =>
+                                  document.querySelector<HTMLButtonElement>(".bot-panel-toggle")?.focus(),
+                                )
+                              }}
+                              onSettings={() => openModal("bot-settings")}
+                              onRoutines={() => openBotRoutines(selectedBot.id)}
+                              onModel={() => openModal("bot-model")}
+                              onPermissions={() => openModal("bot-permissions")}
+                              onPreview={() => setScreen("preview")}
+                              active={data.runs.some(
+                                (run) =>
+                                  run.botId === selectedBot.id &&
+                                  ["queued", "starting", "running"].includes(run.status),
+                              )}
+                              projects={data.projects}
+                              onSelectProject={async (projectId) => {
+                                if (selectedBot) await actions.updateBot(selectedBot.id, { projectId })
+                              }}
+                              onAddProject={() => {
+                                openModal("project")
+                                setProjectLinkBotId(selectedBot?.id ?? null)
+                              }}
+                              onRole={(roleLine) => actions.updateBot(selectedBot.id, { roleLine })}
+                            />
+                          </ErrorBoundary>
+                        )
                       )}
                     </MotionPresence>
                   </div>
@@ -814,6 +1004,7 @@ const AppContent = ({ kernel }: AppProps) => {
         {/* r8 motion: central overlay presence (settings content stays owned by its package) */}
         <ErrorBoundary area="a busca" dialog api={api} onClose={() => setSearchOpen(false)}>
           <CommandPalette
+            api={api}
             open={searchOpen}
             bots={data.bots}
             threads={data.threads}
@@ -824,7 +1015,7 @@ const AppContent = ({ kernel }: AppProps) => {
             onRun={runPaletteCommand}
           />
         </ErrorBoundary>
-        <MotionPresence show={modal !== null} kind="modal">
+        <MotionPresence show={modal !== null && modal !== "bot"} kind="modal">
           <ErrorBoundary key={modal} area="o diálogo" dialog api={api} onClose={closeModal}>
             {modal === "group" && (
               <GroupModal
@@ -838,7 +1029,6 @@ const AppContent = ({ kernel }: AppProps) => {
               />
             )}
             {setupModal}
-            {botModal}
             {modal === "project" && (
               <ProjectModal
                 project={null}
@@ -851,7 +1041,7 @@ const AppContent = ({ kernel }: AppProps) => {
                 onClose={closeModal}
                 onOpenPreview={() => {
                   closeModal()
-                  setScreen("preview")
+                  setRoute({ section: "bots", screen: "preview" })
                 }}
                 onNotice={showNotice}
               />
@@ -860,6 +1050,10 @@ const AppContent = ({ kernel }: AppProps) => {
               <SettingsModal
                 api={api}
                 invokeCommand={invokeCommand}
+                doctor={data.doctor}
+                doctorError={data.doctorError}
+                onRefreshDoctor={actions.refreshDoctor}
+                onImport={() => setModal("import")}
                 initialSection={settingsInitialSection}
                 focusSetting={settingFocus}
                 settings={data.settings}
@@ -867,34 +1061,28 @@ const AppContent = ({ kernel }: AppProps) => {
                 onSave={actions.updateSettings}
               />
             )}
-            {(modal === "bot-settings" || modal === "bot-permissions" || modal === "bot-mcp") && selectedBot && (
-              <BotSettingsModal
-                invokeCommand={invokeCommand}
-                bots={data.bots}
-                permissionsOnly={modal === "bot-permissions"}
-                focusMcp={modal === "bot-mcp"}
-                initialSection={modal === "bot-settings" ? botSettingsSection : undefined}
-                focusSetting={modal === "bot-settings" ? settingFocus : null}
-                activeTurns={data.runs.some(
-                  (run) => run.botId === selectedBot.id && ["queued", "starting", "running"].includes(run.status),
-                )}
-                onOpenIntegrations={() => {
-                  closeModal()
-                  setRoute({ section: "touri", page: "integracoes" })
-                }}
+            {modal === "bot-model" && selectedBot && (
+              <BotModelModal
+                key={`${selectedBot.id}:${selectedBot.provider}`}
                 api={api}
-                capability={data.machineCapability}
-                machineState={data.machines.find((state) => state.botId === selectedBot.id)}
                 bot={selectedBot}
-                projects={data.projects}
-                routines={botRoutines}
-                actions={actions}
+                onSave={(model) => actions.updateBot(selectedBot.id, { model })}
                 onClose={closeModal}
               />
             )}
+            {botSettingsModal}
           </ErrorBoundary>
         </MotionPresence>
       </main>
+      {routineDraft && (
+        <RoutineEditor
+          initial={routineDraft}
+          bots={data.bots}
+          host={data.routineHost}
+          actions={actions}
+          onClose={() => setRoutineDraft(null)}
+        />
+      )}
     </AvatarRuntimeProvider>
   )
 }
@@ -926,7 +1114,9 @@ const SidecarErrorScreen = ({
           ? t("The app and the local service use incompatible versions.")
           : t("Touri is unavailable until the local service reconnects.")}
       </p>
-      <p className="error-reason">{reason}</p>
+      <div className="error-reason">
+        <ErrorNotice error={reason} showActions={false} />
+      </div>
       <button type="button" className="button button-brand" onClick={onRetry} disabled={retrying} aria-busy={retrying}>
         {t("Retry connection")}
         <span>→</span>
@@ -938,49 +1128,39 @@ const SidecarErrorScreen = ({
 )
 
 const OnboardingLanding = ({
-  doctor,
+  host,
   onCreateBot,
   onDoctor,
   onImport,
 }: {
-  doctor: import("@touri/contracts").DoctorReport | null
+  host: "mac" | "server"
   onCreateBot: () => void
   onDoctor: () => void
   onImport: () => void
 }) => (
   <main className="onboarding-screen">
     <div className="onboarding-card">
-      <div className="brand-lockup">
+      <h1 className="brand-lockup">
         <img className="brand-bull" src="/touri-bull.png" alt="" />
         <span className="brand-name">touri</span>
-      </div>
-      <p className="eyebrow">{t("local-first desktop")}</p>
-      <h1>{t("A calm home for your teammates.")}</h1>
-      <p>
-        {t(
-          "Run persistent Codex, Claude Code or OpenCode teammates in real project folders, keep every conversation branch, and see the apps they start.",
-        )}
-      </p>
+      </h1>
+      <p>{t("onboarding.privacy", { host: host === "mac" ? "Mac" : t("onboarding.server") })}</p>
       <div className="onboarding-actions">
         <button type="button" className="button button-brand" onClick={onCreateBot}>
-          {t("Create first bot")}
-          <span>→</span>
-        </button>
-        <button type="button" className="button button-outline" onClick={onDoctor}>
-          {t("Check this Mac")}
-        </button>
-        <button type="button" className="button button-outline" onClick={onImport}>
-          {t("Import from legacy app")}
+          {t("Create my first bot")}
+          <span aria-hidden="true">→</span>
         </button>
       </div>
-      <div className="onboarding-foot">
+      <div className="onboarding-secondary">
         <span>
-          <span className="status-dot status-green" />{" "}
-          {doctor
-            ? t("Checks ready", { count: doctor.checks.filter((check) => check.ok).length })
-            : t("doctor runs locally")}
+          {t("Already use another tool?")}{" "}
+          <button type="button" className="text-button" onClick={onImport}>
+            {t("Import")}
+          </button>
         </span>
-        <span>{t("Apache-2.0 · no telemetry")}</span>
+        <button type="button" className="text-button" onClick={onDoctor}>
+          {t(host === "mac" ? "Check this Mac" : "onboarding.checkServer")}
+        </button>
       </div>
     </div>
   </main>
