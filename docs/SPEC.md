@@ -348,6 +348,13 @@ env: CLAUDE_CODE_ENABLE_TODO_TOOLS=1, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 - File-based, in the bot home. Bots edit MEMORY.md and `memory/log/<date>.md` with their normal file tools; the base instructions say when.
 - The app shows these files read/write in a "Memory" tab (later), and SOUL is editable in bot settings.
 - Skills: `skills/<name>/SKILL.md` (legacy app layout). The index goes into the instructions (3.2).
+- **Mem0 (optional, per bot, off by default).** Set in Integrações. It runs next to MEMORY.md, never instead of it: MEMORY.md holds durable working rules the user can read and edit, Mem0 holds facts about the user.
+  - Modes: Mem0 Cloud (platform v3, `Authorization: Token`) or a self-hosted Mem0 server (`X-API-Key`), both through plain `fetch`. Non-secret settings live in the `mem0:<botId>` settings key; the API key goes to the keychain (`mem0/<botId>`), is registered for redaction and is never returned by the API (`hasApiKey` only). Deleting the bot forgets both.
+  - Identity: `user_id` is one generated id per install (`mem0-owner-id`), `agent_id` is the bot id. Scope `user` searches every memory about the owner; scope `bot` adds the `agent_id` filter.
+  - Recall: before a normal user turn (not group, delegated, routine, retry or continuation turns; not trivial or slash messages) touri searches with the user's text and prepends a `<mem0-recall>` block to that turn's input only. The stored message is unchanged and the per-thread system prompt only gets a static paragraph, so the provider's prompt cache keeps working. The turn waits at most 3.5 s; on timeout or error it runs without recall.
+  - Sync: after the turn succeeds, the user and assistant text (fences stripped, each cut to about 2,000 characters at a sentence end) goes to Mem0 with `infer: true`, fire and forget, one in flight per bot. "Enviar cada conversa automaticamente" turns this off.
+  - Tools `mem0_search`, `mem0_add` (stored verbatim), `mem0_update` and `mem0_delete` are listed only when Mem0 is on for the bot and never in group sessions. Update and delete first read the memory and refuse one that belongs to another user (or another bot in `bot` scope). Writes go through the normal mutation gate.
+  - Five consecutive failures pause calls for that bot for 2 minutes; not-found answers do not count, and saving the settings resets the pause.
 
 ### 3.8 Routines (WP3)
 - **Scheduler.** Ticks every 30s and on `power.sleep {sleeping:false}`. Cron evaluation uses `croner` (MIT) in the routine's IANA timezone. The minimum interval is 5 min, enforced at create/update.

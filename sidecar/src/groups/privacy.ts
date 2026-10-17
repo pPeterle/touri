@@ -5,8 +5,19 @@ import type { Kernel, Thread, ToolContext } from "@touri/contracts"
 export const groupHistoryThread = (thread: Thread): string | null =>
   thread.groupId ? (thread.groupThreadId ?? thread.id) : null
 
-/** Routines are private bot configuration written in direct chats; a group session can neither read nor rewrite them. */
-export const PRIVATE_BOT_TOOLS: ReadonlySet<string> = new Set(["routine_list", "routine_create", "routine_update"])
+/**
+ * Routines are private bot configuration written in direct chats; a group session can neither read nor rewrite them.
+ * Mem0 memories are private facts about the owner and stay out of group sessions too.
+ */
+export const PRIVATE_BOT_TOOLS: ReadonlySet<string> = new Set([
+  "routine_list",
+  "routine_create",
+  "routine_update",
+  "mem0_search",
+  "mem0_add",
+  "mem0_update",
+  "mem0_delete",
+])
 
 export const hiddenInGroupSession = (kernel: Kernel, threadId: string, toolName: string): boolean =>
   PRIVATE_BOT_TOOLS.has(toolName) && !!kernel.services.use("store.api")?.getThread({ threadId })?.groupId

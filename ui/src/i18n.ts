@@ -294,6 +294,37 @@ export const ptBR = {
   "Horário de Brasília": "Horário de Brasília",
   "Destino dos resultados": "Destino dos resultados",
   "Nesta conversa": "Nesta conversa",
+  "Memória Mem0": "Memória Mem0",
+  "Lembra fatos sobre você entre conversas. Antes de cada mensagem, o bot busca no Mem0 o que já sabe; depois, envia a troca para o Mem0 extrair fatos novos.":
+    "Lembra fatos sobre você entre conversas. Antes de cada mensagem, o bot busca no Mem0 o que já sabe; depois, envia a troca para o Mem0 extrair fatos novos.",
+  "Ativar Mem0 para este bot": "Ativar Mem0 para este bot",
+  Ligado: "Ligado",
+  Desligado: "Desligado",
+  "Onde ficam as memórias": "Onde ficam as memórias",
+  "Mem0 Cloud": "Mem0 Cloud",
+  "Servidor próprio": "Servidor próprio",
+  "URL do servidor": "URL do servidor",
+  "Chave da API": "Chave da API",
+  "Chave salva. Digite outra para trocar.": "Chave salva. Digite outra para trocar.",
+  "Remover chave": "Remover chave",
+  Alcance: "Alcance",
+  "Memórias sobre você, compartilhadas entre bots": "Memórias sobre você, compartilhadas entre bots",
+  "Só deste bot": "Só deste bot",
+  "Enviar cada conversa ao Mem0 automaticamente": "Enviar cada conversa ao Mem0 automaticamente",
+  "Memórias por busca": "Memórias por busca",
+  "Relevância mínima (0 a 1)": "Relevância mínima (0 a 1)",
+  "Salvar Mem0": "Salvar Mem0",
+  "Salvo.": "Salvo.",
+  "Conexão funcionando.": "Conexão funcionando.",
+  "Não foi possível carregar o Mem0.": "Não foi possível carregar o Mem0.",
+  "Não foi possível salvar. Confira os campos e tente de novo.":
+    "Não foi possível salvar. Confira os campos e tente de novo.",
+  "Com o Mem0 ligado, o texto das suas mensagens e das respostas deste bot vai para o Mem0 Cloud.":
+    "Com o Mem0 ligado, o texto das suas mensagens e das respostas deste bot vai para o Mem0 Cloud.",
+  "Com o Mem0 ligado, o texto das suas mensagens e das respostas deste bot vai para o seu servidor Mem0, que o repassa ao modelo configurado nele.":
+    "Com o Mem0 ligado, o texto das suas mensagens e das respostas deste bot vai para o seu servidor Mem0, que o repassa ao modelo configurado nele.",
+  "O Mem0 não é usado em grupos, rotinas nem pedidos delegados.":
+    "O Mem0 não é usado em grupos, rotinas nem pedidos delegados.",
   "Conversa principal": "Conversa principal",
   "Nova conversa por execução": "Nova conversa por execução",
   "Conversa de resultados": "Conversa de resultados",
@@ -1362,6 +1393,13 @@ export const ptBR = {
     "Solicitar aprovação de uma ferramenta do Claude e devolver a decisão ao provedor.",
   "List this bot's routines. Call before routine_create; update an existing routine instead of creating a duplicate.":
     "Listar as rotinas deste bot antes de criar outra, evitando duplicações.",
+  "Search this bot's Mem0 memories about the user. Only available when Mem0 is enabled for the bot.":
+    "Buscar no Mem0 as memórias deste bot sobre o usuário.",
+  "Store one durable fact about the user in Mem0, verbatim. Never store secrets.":
+    "Guardar no Mem0 um fato duradouro sobre o usuário, sem segredos.",
+  "Replace the text of one of this bot's Mem0 memories (id from mem0_search).":
+    "Corrigir o texto de uma memória deste bot no Mem0.",
+  "Delete one of this bot's Mem0 memories (id from mem0_search).": "Apagar uma memória deste bot no Mem0.",
   "Create a routine for this bot. It is created DISABLED; the user enables it in the app.":
     "Criar uma rotina pausada para este bot. Somente o usuário pode habilitá-la no aplicativo.",
   "Create a routine for this bot and request explicit user approval in chat to activate it. Remains disabled if not approved. Always requires approval, even with approvals disabled.":
@@ -2319,6 +2357,36 @@ const englishOverrides: Partial<Record<TranslationKey, string>> = {
   "Horário de Brasília": "Brasília time",
   "Destino dos resultados": "Results destination",
   "Nesta conversa": "This conversation",
+  "Memória Mem0": "Mem0 memory",
+  "Lembra fatos sobre você entre conversas. Antes de cada mensagem, o bot busca no Mem0 o que já sabe; depois, envia a troca para o Mem0 extrair fatos novos.":
+    "Remembers facts about you across conversations. Before each message the bot looks up what it already knows in Mem0; afterwards it sends the exchange to Mem0 to extract new facts.",
+  "Ativar Mem0 para este bot": "Turn on Mem0 for this bot",
+  Ligado: "On",
+  Desligado: "Off",
+  "Onde ficam as memórias": "Where memories are stored",
+  "Mem0 Cloud": "Mem0 Cloud",
+  "Servidor próprio": "Self-hosted server",
+  "URL do servidor": "Server URL",
+  "Chave da API": "API key",
+  "Chave salva. Digite outra para trocar.": "Key saved. Type another one to replace it.",
+  "Remover chave": "Remove key",
+  Alcance: "Scope",
+  "Memórias sobre você, compartilhadas entre bots": "Memories about you, shared across bots",
+  "Só deste bot": "This bot only",
+  "Enviar cada conversa ao Mem0 automaticamente": "Send each conversation to Mem0 automatically",
+  "Memórias por busca": "Memories per lookup",
+  "Relevância mínima (0 a 1)": "Minimum relevance (0 to 1)",
+  "Salvar Mem0": "Save Mem0",
+  "Salvo.": "Saved.",
+  "Conexão funcionando.": "Connection works.",
+  "Não foi possível carregar o Mem0.": "Could not load Mem0.",
+  "Não foi possível salvar. Confira os campos e tente de novo.": "Could not save. Check the fields and try again.",
+  "Com o Mem0 ligado, o texto das suas mensagens e das respostas deste bot vai para o Mem0 Cloud.":
+    "With Mem0 on, the text of your messages and of this bot's replies is sent to Mem0 Cloud.",
+  "Com o Mem0 ligado, o texto das suas mensagens e das respostas deste bot vai para o seu servidor Mem0, que o repassa ao modelo configurado nele.":
+    "With Mem0 on, the text of your messages and of this bot's replies is sent to your Mem0 server, which passes it to the model configured there.",
+  "O Mem0 não é usado em grupos, rotinas nem pedidos delegados.":
+    "Mem0 is not used in groups, routines or delegated requests.",
   "Conversa principal": "Main conversation",
   "Nova conversa por execução": "New conversation for each run",
   "Conversa de resultados": "Results conversation",

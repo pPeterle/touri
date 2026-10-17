@@ -885,7 +885,20 @@ export const createRuntimeEngine = ({
     const carryover = thread.carryoverNote
     if (carryover) store.updateThread({ threadId: thread.id, patch: { carryoverNote: null } })
     const toolSummary = tools.summary(store, thread.id, request?.id)
-    const inputText = [carryover, toolSummary, requestText].filter(Boolean).join("\n\n")
+    // Optional Mem0 recall rides on this turn's input only: the stored message stays as the user wrote it.
+    // Private memories never reach group or delegated sessions, routines, retries or continuations.
+    const mem0 = kernel.services.use("mem0.api")
+    const remembers =
+      !!mem0 &&
+      !!request &&
+      request.role === "user" &&
+      !resumedFrom &&
+      run.trigger === "user" &&
+      !thread.groupId &&
+      bot.machine !== "cloud" &&
+      mem0.enabled(bot.id)
+    const recalled = remembers && request ? await mem0?.recall({ botId: bot.id, query: request.text }) : null
+    const inputText = [recalled, carryover, toolSummary, requestText].filter(Boolean).join("\n\n")
     const input: Array<TextPart | Extract<MessagePart, { type: "image" }>> = request
       ? [
           { type: "text", text: inputText },
@@ -1203,6 +1216,8 @@ export const createRuntimeEngine = ({
           })
           if (plan) scheduleContinuation({ run, plan })
           else {
+            if (remembers && request)
+              mem0?.sync({ botId: bot.id, threadId: thread.id, userText: request.text, assistantText: state.text })
             finishRoutineRun({ run, state, status: "succeeded" })
             notices.done({ botId: run.botId, threadId: run.threadId, summary: state.text })
           }

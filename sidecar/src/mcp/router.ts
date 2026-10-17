@@ -78,6 +78,7 @@ const visibleTo = ({
   )
     return false
   if (hiddenInGroupSession(kernel, caller.threadId, tool.name)) return false
+  if (tool.name.startsWith("mem0_") && !kernel.services.use("mem0.api")?.enabled(caller.botId)) return false
   const meta = toolMetadata(tool)
   if (!experimental && !meta.mvp) return false
   if (meta.internal && caller.provider !== "claude") return false
