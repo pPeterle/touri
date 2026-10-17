@@ -706,6 +706,30 @@ export type ProviderLoginFlow = {
   message?: string
 }
 
+/** Per-bot Telegram bridge. Off by default; only allowlisted private chats reach the bot. */
+export type TelegramIntegrationConfig = {
+  enabled: boolean
+  /** Telegram user IDs allowed to talk to the bot. Empty means nobody. */
+  allowedUserIds: Array<string>
+  /** Chat that receives routine results when forwardRoutines is on. */
+  homeChatId: string | null
+  forwardRoutines: boolean
+}
+
+export type TelegramIntegrationStatus = {
+  state: 'off' | 'connecting' | 'connected' | 'error'
+  username: string | null
+  error: string | null
+}
+
+export type TelegramIntegration = {
+  config: TelegramIntegrationConfig
+  tokenSaved: boolean
+  status: TelegramIntegrationStatus
+  /** Last sender refused by the allowlist, so the user can allow them in one click. */
+  lastRejected: { userId: string; name: string; at: EpochMs } | null
+}
+
 export type SendMessageInput = {
   clientNonce?: string
   deadline?: EpochMs
@@ -744,6 +768,11 @@ export type ApiRoutes = {
   'PATCH /bots/:id': { req: Partial<CreateBotInput & { paused: boolean }>; res: { bot: Bot } }
   'DELETE /bots/:id': { req: { name: string; deleteVolumes?: boolean }; res: {} }
   'GET /bots/:id/mcp': { req: {}; res: { servers: Array<McpServer> } }
+  'GET /bots/:id/integrations/telegram': { req: {}; res: { telegram: TelegramIntegration } }
+  'PUT /bots/:id/integrations/telegram': {
+    req: Partial<TelegramIntegrationConfig> & { token?: string | null }
+    res: { telegram: TelegramIntegration }
+  }
   'GET /bots/:id/mcp/prerequisites': { req: {}; res: { prerequisites: McpPrerequisites } }
   'POST /bots/:id/mcp/test': { req: McpServer; res: { server: McpServer } }
   'PUT /bots/:id/mcp/:name': { req: McpServer; res: { server: McpServer } }
@@ -1164,6 +1193,7 @@ export type ServiceMap = {
   'runtime.activeRun': (args: { threadId: Id }) => Run | null
   'runtime.continueAfterApproval': (ctx: Pick<ToolContext, 'botId' | 'threadId' | 'runId' | 'signal'>) => boolean
   'runtime.cancelBotTurns': (args: { botId: Id }) => Promise<void>
+  'runtime.cancelRun': (args: { runId: Id }) => boolean
   'runtime.shutdown': () => Promise<void>
   'projects.info': (args: { projectId: Id; botId?: Id }) => Promise<ProjectInfo | null>
   'browser.tabsForBot': (args: { botId: Id }) => Array<BrowserTabInfo>

@@ -1989,9 +1989,60 @@ export const ptBR = {
   "As permissões de pastas salvas não funcionam neste computador. Você pode conversar sem ferramentas. Remova essas permissões nas configurações do bot para continuar com tarefas.":
     "As permissões de pastas salvas não funcionam neste computador. Você pode conversar sem ferramentas. Remova essas permissões nas configurações do bot para continuar com tarefas.",
   "Remover permissões antigas": "Remover permissões antigas",
+  // Telegram integration.
+  Telegram: "Telegram",
+  "Converse com este bot pelo Telegram. Só as pessoas permitidas abaixo conseguem falar com ele.":
+    "Converse com este bot pelo Telegram. Só as pessoas permitidas abaixo conseguem falar com ele.",
+  "Ativar Telegram": "Ativar Telegram",
+  Desligado: "Desligado",
+  "Conectado como @{username}": "Conectado como @{username}",
+  Conectado: "Conectado",
+  "Token do bot": "Token do bot",
+  "Token salvo": "Token salvo",
+  "Cole o token do @BotFather": "Cole o token do @BotFather",
+  "Salvar token": "Salvar token",
+  "Remover token": "Remover token",
+  "IDs de usuário permitidos": "IDs de usuário permitidos",
+  "Separe por vírgula. Vazio: ninguém consegue falar com o bot.":
+    "Separe por vírgula. Vazio: ninguém consegue falar com o bot.",
+  "Chat para resultados de rotinas": "Chat para resultados de rotinas",
+  "Enviar resultados das rotinas para esse chat": "Enviar resultados das rotinas para esse chat",
+  "Salvar Telegram": "Salvar Telegram",
+  "Pedido de {name} (ID {id})": "Pedido de {name} (ID {id})",
+  Permitir: "Permitir",
+  "Não foi possível carregar o Telegram deste bot.": "Não foi possível carregar o Telegram deste bot.",
+  "Não foi possível salvar. Confira o token e tente novamente.":
+    "Não foi possível salvar. Confira o token e tente novamente.",
+  "Atualizar status": "Atualizar status",
+  "Crie um bot com o @BotFather e cole o token. Quando alguém mandar a primeira mensagem, o ID aparece aqui para você permitir.":
+    "Crie um bot com o @BotFather e cole o token. Quando alguém mandar a primeira mensagem, o ID aparece aqui para você permitir.",
 } as const
 export type TranslationKey = keyof typeof ptBR
 const englishOverrides: Partial<Record<TranslationKey, string>> = {
+  "Converse com este bot pelo Telegram. Só as pessoas permitidas abaixo conseguem falar com ele.":
+    "Talk to this bot on Telegram. Only the people allowed below can reach it.",
+  "Ativar Telegram": "Enable Telegram",
+  Desligado: "Off",
+  "Conectado como @{username}": "Connected as @{username}",
+  Conectado: "Connected",
+  "Token do bot": "Bot token",
+  "Token salvo": "Token saved",
+  "Cole o token do @BotFather": "Paste the token from @BotFather",
+  "Salvar token": "Save token",
+  "Remover token": "Remove token",
+  "IDs de usuário permitidos": "Allowed user IDs",
+  "Separe por vírgula. Vazio: ninguém consegue falar com o bot.":
+    "Separate with commas. Empty: nobody can reach the bot.",
+  "Chat para resultados de rotinas": "Chat for routine results",
+  "Enviar resultados das rotinas para esse chat": "Send routine results to this chat",
+  "Salvar Telegram": "Save Telegram",
+  "Pedido de {name} (ID {id})": "Request from {name} (ID {id})",
+  Permitir: "Allow",
+  "Não foi possível carregar o Telegram deste bot.": "Could not load this bot's Telegram settings.",
+  "Não foi possível salvar. Confira o token e tente novamente.": "Could not save. Check the token and try again.",
+  "Atualizar status": "Refresh status",
+  "Crie um bot com o @BotFather e cole o token. Quando alguém mandar a primeira mensagem, o ID aparece aqui para você permitir.":
+    "Create a bot with @BotFather and paste its token. When someone sends the first message, their ID shows up here so you can allow it.",
   "Abrir resultado completo": "Open full result",
   "Carregando resultado…": "Loading result…",
   "Carregar mais saída": "Load more output",
