@@ -84,6 +84,27 @@ export type SecretMeta = {
 
 export type McpToolPolicy = 'always_allow' | 'needs_approval' | 'blocked'
 export type McpTool = { name: string; description: string; inputSchema?: Record<string, unknown>; classification?: 'reads' | 'writes'; policy?: McpToolPolicy }
+/** Hermes-style continuous learning for one bot; every switch is off by default. */
+export type BotLearningSettings = {
+  /** memory_write is available and periodic reviews may save facts to MEMORY.md and USER.md. */
+  memory: boolean
+  /** skill_* tools are available and periodic reviews may propose skills. */
+  skills: boolean
+  /** A memory review runs after this many completed user turns. */
+  memoryEveryTurns: number
+  /** A skills review runs once this many tool calls have happened since the last skill change. */
+  skillsAfterToolCalls: number
+}
+
+export type BotLearning = BotLearningSettings & {
+  turns: number
+  toolCalls: number
+  reviewThreadId: Id | null
+  memoryChars: number
+  userChars: number
+  skillCount: number
+}
+
 export type McpServer = ({ name: string; transport: 'stdio'; command: string; args: Array<string> } | { name: string; transport: 'http'; url: string }) & { tools: Array<McpTool> }
 
 export type McpPrerequisites = {
@@ -776,6 +797,8 @@ export type ApiRoutes = {
     req: Partial<TelegramIntegrationConfig> & { token?: string | null }
     res: { telegram: TelegramIntegration }
   }
+  'GET /bots/:id/learning': { req: {}; res: { learning: BotLearning } }
+  'PUT /bots/:id/learning': { req: Partial<BotLearningSettings>; res: { learning: BotLearning } }
   'GET /bots/:id/mcp/prerequisites': { req: {}; res: { prerequisites: McpPrerequisites } }
   'POST /bots/:id/mcp/test': { req: McpServer; res: { server: McpServer } }
   'PUT /bots/:id/mcp/:name': { req: McpServer; res: { server: McpServer } }

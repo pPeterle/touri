@@ -2,6 +2,7 @@ import type {
   ApiRoutes,
   Bot,
   BotGroup,
+  BotLearning,
   BrowserTabInfo,
   DoctorReport,
   GroupInput,
@@ -348,6 +349,7 @@ export const createMockApi = ({ scenario }: { scenario?: MockScenario | null } =
   const bots = seed.bots.map((bot, index) => createBot(bot, index, project.id))
   const threads = seed.threads.map(createThread)
   const messages = seed.messages.map((message) => createMessage(message))
+  const learning = new Map<string, BotLearning>()
   const machines = new Map<string, import("@touri/contracts").MachineState>()
   const networkPolicies = new Map<string, Record<string, unknown>>()
   const runs = new Map<string, Run>()
@@ -505,6 +507,24 @@ export const createMockApi = ({ scenario }: { scenario?: MockScenario | null } =
         return { telegram: next } as ApiRoutes[typeof route]["res"]
       }
       return { telegram: current } as ApiRoutes[typeof route]["res"]
+    }
+    if (key === "GET /bots/:id/learning" || key === "PUT /bots/:id/learning") {
+      const id = pathValues.id ?? ""
+      const current = learning.get(id) ?? {
+        memory: false,
+        skills: false,
+        memoryEveryTurns: 10,
+        skillsAfterToolCalls: 10,
+        turns: 0,
+        toolCalls: 0,
+        reviewThreadId: null,
+        memoryChars: 0,
+        userChars: 0,
+        skillCount: 0,
+      }
+      const next = key === "PUT /bots/:id/learning" ? { ...current, ...(input as Partial<BotLearning>) } : current
+      learning.set(id, next)
+      return { learning: next } as ApiRoutes[typeof route]["res"]
     }
     if (key === "GET /bots/:id/mcp/prerequisites")
       return {
