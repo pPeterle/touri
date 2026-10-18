@@ -5,6 +5,7 @@ import { join } from "node:path"
 import type { Bot, Kernel, Mem0Settings, Run, ToolContext, ToolResult } from "@touri/contracts"
 import { setDelegation } from "../../src/groups/security"
 import { createKernel } from "../../src/kernel"
+import { writeLearningState } from "../../src/learning/settings"
 import { createToolRouter } from "../../src/mcp/router"
 import { createBreaker, createMem0Client, Mem0Error } from "../../src/mem0/client"
 import { recallBlock, stripRecall, trivialQuery, truncateAtSentence } from "../../src/mem0/context"
@@ -705,5 +706,9 @@ test("routine and delegated sessions cannot list, invoke or advertise personal m
     secrets: false,
   })
   await check(run.threadId)
+  const review = f.store.createThread({ botId: f.bot.id, kind: "chat", title: "Revisão de teste" })
+  if (!review.success) throw new Error(review.error)
+  writeLearningState(f.kernel, f.bot.id, { turns: 0, toolCalls: 0, reviewThreadId: review.thread.id })
+  await check(review.thread.id)
   expect(f.fake.seen).toEqual([])
 })

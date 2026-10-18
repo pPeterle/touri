@@ -2,6 +2,7 @@ import type {
   ApiRoutes,
   Bot,
   BotGroup,
+  BotLearning,
   BrowserTabInfo,
   DoctorReport,
   GroupInput,
@@ -348,6 +349,7 @@ export const createMockApi = ({ scenario }: { scenario?: MockScenario | null } =
   const threads = seed.threads.map(createThread)
   const messages = seed.messages.map((message) => createMessage(message))
   const mem0Settings = new Map<string, import("@touri/contracts").Mem0Settings>()
+  const learning = new Map<string, BotLearning>()
   const machines = new Map<string, import("@touri/contracts").MachineState>()
   const networkPolicies = new Map<string, Record<string, unknown>>()
   const runs = new Map<string, Run>()
@@ -506,6 +508,24 @@ export const createMockApi = ({ scenario }: { scenario?: MockScenario | null } =
     }
     if (key === "POST /bots/:id/mem0/test") return { ok: true } as ApiRoutes[typeof route]["res"]
     if (key === "GET /bots/:id/mcp") return { servers: [] } as ApiRoutes[typeof route]["res"]
+    if (key === "GET /bots/:id/learning" || key === "PUT /bots/:id/learning") {
+      const id = pathValues.id ?? ""
+      const current = learning.get(id) ?? {
+        memory: false,
+        skills: false,
+        memoryEveryTurns: 10,
+        skillsAfterToolCalls: 10,
+        turns: 0,
+        toolCalls: 0,
+        reviewThreadId: null,
+        memoryChars: 0,
+        userChars: 0,
+        skillCount: 0,
+      }
+      const next = key === "PUT /bots/:id/learning" ? { ...current, ...(input as Partial<BotLearning>) } : current
+      learning.set(id, next)
+      return { learning: next } as ApiRoutes[typeof route]["res"]
+    }
     if (key === "GET /bots/:id/mcp/prerequisites")
       return {
         prerequisites: { machine: "local", status: "checked", node: true, oauthKeys: true, credentials: true },

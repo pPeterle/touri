@@ -5,6 +5,7 @@ import { join } from "node:path"
 import type { Bot, Kernel, Message, Run } from "@touri/contracts"
 import { setDelegation } from "../../src/groups/security"
 import { createKernel } from "../../src/kernel"
+import { writeLearningState } from "../../src/learning/settings"
 import { createMem0 } from "../../src/mem0/index"
 import { createRuntimeEngine } from "../../src/runtime/engine"
 import { init as initStore } from "../../src/store"
@@ -211,6 +212,20 @@ test("delegation cannot recall or sync personal memory even without group metada
     secrets: false,
   })
   const { run } = f.send("Qual a minha cidade?")
+  await until(() => f.finished(run))
+  expect(run.status).toBe("succeeded")
+  expect(f.turnInputs()[0]).not.toContain("<mem0-recall>")
+  await Bun.sleep(30)
+  expect(f.seen).toEqual([])
+})
+
+test("automatic learning reviews never recall or sync external memory", async () => {
+  const f = await fixture()
+  await f.api(`/bots/${f.bot.id}/mem0`, { enabled: true, apiKey: "m0-review-runtime" }, "PUT")
+  const review = f.store.createThread({ botId: f.bot.id, kind: "chat", title: "Revisão de teste" })
+  if (!review.success) throw new Error(review.error)
+  writeLearningState(f.runtime.kernel, f.bot.id, { turns: 0, toolCalls: 0, reviewThreadId: review.thread.id })
+  const { run } = f.send("Revise os fatos desta conversa.", "user", review.thread.id)
   await until(() => f.finished(run))
   expect(run.status).toBe("succeeded")
   expect(f.turnInputs()[0]).not.toContain("<mem0-recall>")
