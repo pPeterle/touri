@@ -515,11 +515,15 @@ test("a delayed settings save cannot recreate credentials after bot deletion", a
     return host(method, params)
   }) as Kernel["callHost"]
   const saved = f.configure({ enabled: true, apiKey: "m0-deleted-bot" })
-  await until(() => saving)
-  const deleted = await f.api(`/bots/${f.bot.id}`, undefined, "DELETE")
-  expect(deleted.ok).toBe(true)
-  await f.mem0.forget(f.bot.id)
-  release()
+  try {
+    await until(() => saving)
+    const deleted = await f.api(`/bots/${f.bot.id}`, { name: f.bot.name }, "DELETE")
+    expect(deleted.ok).toBe(true)
+    await f.mem0.forget(f.bot.id)
+  } finally {
+    release()
+    await saved
+  }
   expect((await saved).status).toBe(404)
   expect(f.vault.size).toBe(0)
   const rows = (f.kernel.db as import("bun:sqlite").Database)
