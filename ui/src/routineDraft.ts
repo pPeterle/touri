@@ -1,4 +1,4 @@
-import type { ApiRoutes, Bot, Message, Routine, Thread } from "@touri/contracts"
+import type { ApiRoutes, Bot, BotGroup, Message, Routine, Thread } from "@touri/contracts"
 import { getJobTemplates } from "./features/jobs/catalog"
 import { t } from "./i18n"
 import { messageMarkdown } from "./messageMarkdown"
@@ -14,13 +14,19 @@ export const newRoutineDraft = (botId: string): RoutineDraft => ({
   enabled: false,
   continuity: "main-thread",
   resultsThreadId: null,
+  groupId: null,
   timeoutMinutes: 30,
   overlap: "skip",
   catchUpMinutes: 30,
 })
 
 /** Reuse the conversation and the bot's existing access; never grant new access. */
-export const repeatTaskDraft = (bot: Bot, thread: Thread, messages: Message[]): RoutineDraft | null => {
+export const repeatTaskDraft = (
+  bot: Bot,
+  thread: Thread,
+  messages: Message[],
+  group: BotGroup | null = null,
+): RoutineDraft | null => {
   const reply = [...messages]
     .reverse()
     .find((message) => message.role === "assistant" && message.status === "complete" && messageMarkdown(message).trim())
@@ -34,11 +40,13 @@ export const repeatTaskDraft = (bot: Bot, thread: Thread, messages: Message[]): 
   const prompt = messageMarkdown(request).trim()
   if (!prompt || prompt.length > 8000) return null
   return {
-    ...newRoutineDraft(bot.id),
+    ...newRoutineDraft(group ? (group.coordinatorBotId ?? group.memberIds[0] ?? bot.id) : bot.id),
     name: (thread.title || prompt).slice(0, 80),
     prompt,
     continuity: "results-thread",
     resultsThreadId: thread.id,
+    // In a group chat the routine posts back into the same group conversation.
+    groupId: group?.id ?? null,
   }
 }
 

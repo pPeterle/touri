@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite"
-import type { Bot, BotGroup, Kernel, Run, ToolContext, ToolResult } from "@touri/contracts"
+import type { Bot, BotGroup, Kernel, Run, ServiceMap, ToolContext, ToolResult } from "@touri/contracts"
 import { hasRecordedActions } from "@touri/contracts/run-failure"
 import { attachedServers } from "../mcp/attached"
 import type { createRuntimeEngine } from "../runtime/engine"
@@ -16,6 +16,8 @@ type Turn = {
   calls: number
   children: Set<string>
   tail: string | null
+  /** Routine turns share the routine's timeout instead of the per-bot chat limit. */
+  deadline: number | null
 }
 type Frame = { turn: Turn; stack: string[]; depth: number; bot: Bot; configuration: string; secrets: boolean }
 const configuration = (bot: Bot) =>
@@ -60,7 +62,10 @@ export const createGroupRuntime = (kernel: Kernel, engine: Engine, timeoutMs = 1
   for (const raw of interrupted) {
     const run = toRun(raw)
     if (run) {
-      persistence.saveRun({ ...run, status: "interrupted", errorClass: "app_restart", finishedAt: Date.now() })
+      const interruptedRun: Run = { ...run, status: "interrupted", errorClass: "app_restart", finishedAt: Date.now() }
+      persistence.saveRun(interruptedRun)
+      // The runtime engine closes a routine run when its group turn ends, including here.
+      kernel.publish({ type: "run.updated", run: interruptedRun })
       const streaming = db
         .query("SELECT id FROM messages WHERE thread_id=? AND status='streaming'")
         .all(run.threadId) as { id: string }[]
@@ -94,7 +99,7 @@ export const createGroupRuntime = (kernel: Kernel, engine: Engine, timeoutMs = 1
     "UPDATE runs SET status='interrupted',error_class='app_restart',finished_at=? WHERE id IN (SELECT run_id FROM group_run_links) AND status='queued'",
   ).run(Date.now())
   const readRun = (id: string) => persistence.getRun(id)
-  const waitRun = (id: string, signal: AbortSignal): Promise<Run> =>
+  const waitRun = (id: string, signal: AbortSignal, waitMs: number): Promise<Run> =>
     new Promise((resolve) => {
       let timer: ReturnType<typeof setTimeout> | undefined
       let dispose = () => {}
@@ -121,7 +126,7 @@ export const createGroupRuntime = (kernel: Kernel, engine: Engine, timeoutMs = 1
       timer = setTimeout(() => {
         engine.cancel(id)
         check()
-      }, timeoutMs)
+      }, waitMs)
       if (signal.aborted) abort()
       else check()
     })
@@ -207,7 +212,11 @@ export const createGroupRuntime = (kernel: Kernel, engine: Engine, timeoutMs = 1
     turn.children.add(result.run.id)
     db.query("INSERT INTO group_run_links VALUES(?,?,?)").run(result.run.id, turn.run.id, depth)
     try {
-      const run = await waitRun(result.run.id, turn.controller.signal)
+      const run = await waitRun(
+        result.run.id,
+        turn.controller.signal,
+        turn.deadline === null ? timeoutMs : Math.max(1, turn.deadline - Date.now()),
+      )
       if (run.status !== "succeeded") throw new Error(run.errorMessage ?? "O bot não concluiu o pedido")
       return store.activePath({ threadId: thread.id }).find((m) => m.id === run.replyMessageId)?.text ?? ""
     } finally {
@@ -338,7 +347,7 @@ export const createGroupRuntime = (kernel: Kernel, engine: Engine, timeoutMs = 1
       if (stopped && busy.size === 0) unsubscribe()
     }
   }
-  const enqueue: import("@touri/contracts").ServiceMap["runtime.enqueue"] = (args) => {
+  const enqueue: ServiceMap["groups.runtime"]["enqueue"] = (args) => {
     const thread = store.getThread({ threadId: args.threadId })
     if (!thread?.groupId || thread.groupThreadId) return engine.enqueue(args)
     const group = groups.get(thread.groupId)
@@ -369,13 +378,20 @@ export const createGroupRuntime = (kernel: Kernel, engine: Engine, timeoutMs = 1
       errorClass: null,
       errorMessage: null,
       usage: null,
-      routineRunId: null,
+      routineRunId: args.routineRunId ?? null,
       queuedAt: Date.now(),
       startedAt: null,
       finishedAt: null,
     }
     persistence.saveRun(run)
     db.query("INSERT INTO group_turns VALUES(?,?,?)").run(run.id, group.id, JSON.stringify(recipients))
+    const budget = args.routineRunId
+      ? (db
+          .query(
+            "SELECT r.timeout_minutes FROM routine_runs rr JOIN routines r ON r.id = rr.routine_id WHERE rr.id = ?",
+          )
+          .get(args.routineRunId) as { timeout_minutes: number } | null)
+      : null
     const turn: Turn = {
       run,
       group,
@@ -384,6 +400,7 @@ export const createGroupRuntime = (kernel: Kernel, engine: Engine, timeoutMs = 1
       calls: 0,
       children: new Set(),
       tail: args.requestMessageId,
+      deadline: budget ? Date.now() + budget.timeout_minutes * 60_000 : null,
     }
     turns.set(run.id, turn)
     queues.set(group.id, [...(queues.get(group.id) ?? []), turn])

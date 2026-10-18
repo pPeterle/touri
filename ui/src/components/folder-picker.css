@@ -15,14 +15,31 @@
 .folder-picker-breadcrumbs {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: var(--space-4);
 }
 
+.folder-picker-breadcrumbs .button[aria-current="location"] {
+  border-color: var(--border-focus);
+  background: var(--surface-selected);
+  color: var(--text-strong);
+}
+
+/* Folders read as one list panel, not a stack of separate buttons. */
 .folder-picker-list {
   min-height: 120px;
   max-height: 260px;
   overflow-y: auto;
-  margin-block: 12px;
+  padding: var(--space-4);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-8);
+  background: var(--surface-settings-card);
+}
+
+.folder-picker-list > p {
+  margin: 0;
+  padding: var(--space-8) var(--space-10);
+  color: var(--text-secondary);
+  font-size: var(--type-12);
 }
 
 .folder-picker-list ul {
@@ -31,27 +48,101 @@
   margin: 0;
 }
 
-.folder-picker-list li button {
+.folder-picker-entry {
+  display: block;
   width: 100%;
+  padding: var(--space-8) var(--space-10);
+  border: 0;
+  border-radius: var(--radius-6);
+  background: transparent;
+  color: var(--text-primary);
+  font-size: var(--type-12);
   text-align: left;
   overflow-wrap: anywhere;
 }
 
-.folder-picker-create,
+.folder-picker-entry:hover:not(:disabled) {
+  background: var(--surface-settings-hover);
+}
+
+.folder-picker details > summary {
+  width: fit-content;
+  color: var(--text-secondary);
+  font-size: var(--type-12);
+  cursor: pointer;
+}
+
+.folder-picker details[open] > summary {
+  margin-bottom: var(--space-8);
+}
+
+.folder-picker-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-8);
+}
+
+.folder-picker-create {
+  display: grid;
+  gap: var(--space-8);
+}
+
+.folder-picker-create .button {
+  justify-self: start;
+}
+
+.folder-picker-create label,
+.folder-picker details label {
+  font-size: var(--type-13);
+  font-weight: var(--weight-medium);
+}
+
 .folder-picker-access {
   display: grid;
-  gap: 8px;
-  margin-block: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-8);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
 }
 
-.folder-picker-access label {
+.folder-picker-access legend {
+  margin-bottom: var(--space-8);
+  padding: 0;
+  font-size: var(--type-13);
+  font-weight: var(--weight-medium);
+}
+
+/* Same option cards as the job choice in bot creation. */
+.folder-picker-option {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  align-items: flex-start;
+  gap: var(--space-8);
+  padding: var(--space-12);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-8);
+  background: var(--surface-settings-card);
+  font-size: var(--type-12);
+  cursor: pointer;
 }
 
-.folder-picker .folder-picker-access input {
-  width: auto;
+.folder-picker-option:has(:checked) {
+  border-color: var(--accent-brand);
+  background: var(--surface-selected);
+}
+
+.folder-picker-option:has(:focus-visible) {
+  outline: 2px solid var(--accent-brand);
+  outline-offset: 2px;
+}
+
+.folder-picker .folder-picker-option input {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin: 1px 0 0;
+  accent-color: var(--accent-brand);
 }
 
 @media (max-width: 600px) {
@@ -69,6 +160,10 @@
   .folder-picker summary,
   .folder-picker-access label {
     min-height: 44px;
+  }
+
+  .folder-picker-access {
+    grid-template-columns: 1fr;
   }
 
   .folder-picker button {
