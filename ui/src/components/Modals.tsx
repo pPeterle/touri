@@ -477,6 +477,12 @@ export const BotCreateModal = ({
   >({ machine: "local", machineIdleMinutes: 10, vmProviderLogin: false, hostComputerUse: false })
   const [saving, setSaving] = useState(false)
   const signInRef = useRef<HTMLElement>(null)
+  // A signed-in account is used by default; "Use another account" opens the same chooser as first sign-in.
+  const [choosingAccount, setChoosingAccount] = useState(false)
+  const showAccountChoice = (): void => {
+    setChoosingAccount(true)
+    requestAnimationFrame(() => signInRef.current?.querySelector<HTMLElement>('[aria-pressed="true"]')?.focus())
+  }
   const chooseProvider = (next: Bot["provider"]): void => {
     setError(null)
     setModel("")
@@ -612,12 +618,19 @@ export const BotCreateModal = ({
                   <p>{t("onboarding.checking", { host: host === "mac" ? "Mac" : t("onboarding.server") })}</p>
                 ) : (
                   login.ready && (
-                    <p>
-                      {t("onboarding.uses", {
-                        provider: providerName(provider),
-                        host: host === "mac" ? "Mac" : t("onboarding.server"),
-                      })}
-                    </p>
+                    <>
+                      <p>
+                        {t("onboarding.uses", {
+                          provider: providerName(provider),
+                          host: host === "mac" ? "Mac" : t("onboarding.server"),
+                        })}
+                      </p>
+                      {!choosingAccount && (
+                        <button type="button" className="text-button" onClick={showAccountChoice}>
+                          {t("Use another account")}
+                        </button>
+                      )}
+                    </>
                   )
                 ))}
               <BotAccessSummary
@@ -630,13 +643,15 @@ export const BotCreateModal = ({
                 anyFolderAccess={anyFolderAccess}
               />
             </div>
-            {api && machine.machine !== "cloud" && !login.checking && !login.ready && (
+            {api && machine.machine !== "cloud" && (choosingAccount || (!login.checking && !login.ready)) && (
               <section ref={signInRef} tabIndex={-1} className="bot-create-login" aria-label={t("Choose an account")}>
                 <p>
                   {t(
-                    login.flow?.executable === "missing"
-                      ? "onboarding.installFirst"
-                      : "Sign in to an account to create your bot.",
+                    login.checking || login.ready
+                      ? "Choose the account this bot will use."
+                      : login.flow?.executable === "missing"
+                        ? "onboarding.installFirst"
+                        : "Sign in to an account to create your bot.",
                   )}
                 </p>
                 <div className="bot-create-accounts">
@@ -652,7 +667,7 @@ export const BotCreateModal = ({
                     </button>
                   ))}
                 </div>
-                {login.flow?.executable === "missing" ? (
+                {login.checking || login.ready ? null : login.flow?.executable === "missing" ? (
                   <ProviderInstallation
                     provider={provider}
                     host={host}
@@ -662,7 +677,7 @@ export const BotCreateModal = ({
                       void login.selectProvider(provider).then(() => document.getElementById("bot-name")?.focus())
                     }}
                   />
-                ) : (
+                ) : !login.error ? (
                   <ProviderLogin
                     key={provider}
                     api={api}
@@ -674,13 +689,20 @@ export const BotCreateModal = ({
                       if (ready) setError(null)
                     }}
                   />
-                )}
+                ) : null}
               </section>
             )}
-            {login.error && machine.machine !== "cloud" && !login.ready && (
-              <p role="alert" className="warning-callout">
-                {login.error}
-              </p>
+            {login.error && !login.checking && machine.machine !== "cloud" && !login.ready && (
+              <div className="warning-callout">
+                <p role="alert">{login.error}</p>
+                <button
+                  type="button"
+                  className="button button-quiet"
+                  onClick={() => void login.selectProvider(provider)}
+                >
+                  {t("onboarding.recheck")}
+                </button>
+              </div>
             )}
             {machine.machine !== "cloud" && (
               <div className="bot-create-fields">

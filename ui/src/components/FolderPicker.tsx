@@ -128,13 +128,13 @@ export const FolderPicker = ({
           </div>
         )}
         <nav aria-label={t("Caminho da pasta")} className="folder-picker-breadcrumbs">
-          <button type="button" className="button-quiet" disabled={busy} onClick={() => void load()}>
+          <button type="button" className="button button-quiet" disabled={busy} onClick={() => void load()}>
             {t("Pasta pessoal")}
           </button>
           {crumbs.map((crumb) => (
             <button
               type="button"
-              className="button-quiet"
+              className="button button-quiet"
               key={crumb.path}
               aria-current={crumb.path === listing?.path ? "location" : undefined}
               disabled={busy}
@@ -149,7 +149,7 @@ export const FolderPicker = ({
           {listing?.parent && (
             <button
               type="button"
-              className="button-quiet"
+              className="folder-picker-entry"
               disabled={busy}
               onClick={() => void load(listing.parent ?? undefined)}
             >
@@ -160,7 +160,12 @@ export const FolderPicker = ({
           <ul aria-label={t("Pastas")}>
             {listing?.folders.map((folder) => (
               <li key={folder.path}>
-                <button type="button" className="button-quiet" disabled={busy} onClick={() => void load(folder.path)}>
+                <button
+                  type="button"
+                  className="folder-picker-entry"
+                  disabled={busy}
+                  onClick={() => void load(folder.path)}
+                >
                   <span aria-hidden="true">▸ </span>
                   {folder.name}
                 </button>
@@ -190,7 +195,7 @@ export const FolderPicker = ({
             />
             <button
               type="button"
-              className="button-quiet"
+              className="button button-quiet"
               disabled={busy || !typedPath.trim()}
               onClick={() => void load(typedPath.trim())}
             >
@@ -198,33 +203,35 @@ export const FolderPicker = ({
             </button>
           </div>
         </details>
-        {invokeCommand && desktop && (
+        <div className="folder-picker-actions">
+          {invokeCommand && desktop && (
+            <button
+              type="button"
+              className="button button-quiet"
+              disabled={busy}
+              onClick={() =>
+                void run(async () => {
+                  const selected = await invokeCommand("pick_folder", { title: t("Escolher pasta") })
+                  if (selected?.path) await load(selected.path)
+                })
+              }
+            >
+              {t("Escolher no Mac…")}
+            </button>
+          )}
           <button
             type="button"
-            className="button-quiet"
-            disabled={busy}
-            onClick={() =>
-              void run(async () => {
-                const selected = await invokeCommand("pick_folder", { title: t("Escolher pasta") })
-                if (selected?.path) await load(selected.path)
-              })
-            }
+            className="button button-quiet"
+            disabled={busy || !listing || !!unavailable}
+            onClick={() => {
+              setCreating(true)
+              setName("")
+              setError(null)
+            }}
           >
-            {t("Escolher no Mac…")}
+            {t("Nova pasta")}
           </button>
-        )}
-        <button
-          type="button"
-          className="button-quiet"
-          disabled={busy || !listing || !!unavailable}
-          onClick={() => {
-            setCreating(true)
-            setName("")
-            setError(null)
-          }}
-        >
-          {t("Nova pasta")}
-        </button>
+        </div>
         {creating && (
           <div className="folder-picker-create">
             <label htmlFor="folder-picker-name">{t("Nome da nova pasta")}</label>
@@ -239,7 +246,7 @@ export const FolderPicker = ({
             />
             <button
               type="button"
-              className="button-quiet"
+              className="button button-quiet"
               disabled={busy || !name.trim()}
               onClick={() => setConfirming(true)}
             >
@@ -248,7 +255,12 @@ export const FolderPicker = ({
             {confirming && (
               <div role="alertdialog" aria-label={t("Criar pasta?")}>
                 <p>{t("Criar a pasta {name} dentro de {path}?", { name: name.trim(), path: listing?.path ?? "" })}</p>
-                <button type="button" className="button-quiet" disabled={busy} onClick={() => setConfirming(false)}>
+                <button
+                  type="button"
+                  className="button button-quiet"
+                  disabled={busy}
+                  onClick={() => setConfirming(false)}
+                >
                   {t("Cancelar")}
                 </button>
                 <button
@@ -271,7 +283,7 @@ export const FolderPicker = ({
         )}
         <fieldset className="folder-picker-access" disabled={busy || !!unavailable}>
           <legend>{t("Acesso à pasta")}</legend>
-          <label>
+          <label className="folder-picker-option">
             <input
               type="radio"
               name="folder-access"
@@ -283,7 +295,7 @@ export const FolderPicker = ({
             />
             {t("Somente leitura")}
           </label>
-          <label>
+          <label className="folder-picker-option">
             <input
               type="radio"
               name="folder-access"
@@ -300,7 +312,7 @@ export const FolderPicker = ({
         {listing && <p className="bot-folder-path">{listing.path}</p>}
         {error && <p role="alert">{error}</p>}
         <div className="modal-actions">
-          <button type="button" className="button-quiet" disabled={busyRef.current} onClick={onClose}>
+          <button type="button" className="button button-quiet" disabled={busyRef.current} onClick={onClose}>
             {t("Cancelar")}
           </button>
           <button

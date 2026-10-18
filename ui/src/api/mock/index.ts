@@ -223,6 +223,7 @@ const createRoutine = (botId: string): Routine => ({
   enabled: false,
   continuity: "main-thread",
   resultsThreadId: null,
+  groupId: null,
   timeoutMinutes: 30,
   overlap: "skip",
   catchUpMinutes: 30,

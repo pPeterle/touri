@@ -29,6 +29,7 @@ import { hasRecordedActions, refineErrorClass, safeRunFailure } from "@touri/con
 import { createApprovalBridge } from "../approvals/bridge"
 import { approvalOutcome } from "../approvals/outcome"
 import { delegatedBot } from "../groups/security"
+import { createGroupStore } from "../groups/store"
 import { buildChildEnv } from "../kernel"
 import { folderAccessUnavailable, folderGrantProblem, refreshHostFolderAccess } from "../kernel/folder-capability"
 import { providerProfileEnv } from "../kernel/provider-profiles"
@@ -108,6 +109,7 @@ type RoutineCreate = {
   enabled: boolean
   continuity: RoutineContinuity
   resultsThreadId: Id | null
+  groupId: Id | null
   timeoutMinutes: number
   overlap: Routine["overlap"]
   catchUpMinutes: number
@@ -504,7 +506,7 @@ export const createRuntimeEngine = ({
     if (event.type === "session") {
       state.externalSessionId = event.externalSessionId
       state.rolloutPath = event.rolloutPath
-      if (state.fingerprint)
+      if (state.fingerprint) {
         continuations.saveResumePoint({
           runId: run.id,
           point: {
@@ -513,6 +515,25 @@ export const createRuntimeEngine = ({
             fingerprint: state.fingerprint,
           },
         })
+        // A turn can outlive the server. Ordinary follow-ups need this session too,
+        // even when automatic continuation is disabled or unsafe.
+        const current = persistence.getActiveSession({ threadId: run.threadId, provider: run.provider })
+        const sameSession = current?.externalSessionId === event.externalSessionId
+        if (current && !sameSession) persistence.markSession({ id: current.id, state: "replaced" })
+        const now = Date.now()
+        persistence.saveSession({
+          id: sameSession ? current.id : kernel.newId(),
+          threadId: run.threadId,
+          provider: run.provider,
+          externalSessionId: event.externalSessionId,
+          rolloutPath: event.rolloutPath,
+          fingerprint: state.fingerprint,
+          state: "active",
+          model: store.getBot({ botId: run.botId })?.model ?? null,
+          createdAt: sameSession ? current.createdAt : now,
+          lastUsedAt: now,
+        })
+      }
       return
     }
     if (event.type === "turn_started") {
@@ -756,6 +777,45 @@ export const createRuntimeEngine = ({
     if (routine) kernel.publish({ type: "routine.updated", routine, lastRun: finished })
   }
 
+  // A group turn runs in the group runtime; its routine run closes here when the aggregate run ends.
+  const finishGroupRoutineRun = (run: Run): void => {
+    if (!run.routineRunId || ["queued", "starting", "running"].includes(run.status)) return
+    if (!(kernel.db instanceof Database) || !kernel.db.query("SELECT 1 FROM group_turns WHERE run_id = ?").get(run.id))
+      return
+    const routineRun = persistence.getRoutineRun(run.routineRunId)
+    const routine = routineRun ? persistence.getRoutine(routineRun.routineId) : null
+    if (!routineRun || !routine || routineRun.status !== "running") return
+    const store = kernel.services.use("store.api")
+    const path = store?.activePath({ threadId: run.threadId }) ?? []
+    const replies = path
+      .slice(path.findIndex((message) => message.id === run.requestMessageId) + 1)
+      .filter((message) => message.role === "assistant" && message.text.trim())
+      .map((message) => `${message.sender?.name ?? "bot"}: ${message.text.trim()}`)
+    const status: RoutineRun["status"] =
+      run.status === "succeeded" ? "succeeded" : run.status === "failed" ? "failed" : "canceled"
+    const summary =
+      run.errorClass === "app_restart"
+        ? "Interrupted because touri restarted"
+        : (run.errorMessage ?? (replies.join("\n\n") || "Turno do grupo concluído"))
+    const finished: RoutineRun = {
+      ...routineRun,
+      status,
+      summary: bounded({ value: summary, max: 500 }),
+      finishedAt: run.finishedAt ?? Date.now(),
+    }
+    persistence.updateRoutineRun(finished)
+    kernel.publish({ type: "routine.updated", routine, lastRun: finished })
+    if (status === "failed")
+      notices.failure({ botId: routine.botId, threadId: run.threadId, routine: true, reason: summary })
+  }
+  // Minimal test kernels have no event bus; they also have no group runtime.
+  const unsubscribeGroupTurns =
+    typeof kernel.subscribe === "function"
+      ? kernel.subscribe(({ event }) => {
+          if (event.type === "run.updated") finishGroupRoutineRun(event.run)
+        })
+      : () => {}
+
   const execute = async (run: Run): Promise<void> => {
     if (!isLive(run)) {
       active.delete(run.threadId)
@@ -828,6 +888,16 @@ export const createRuntimeEngine = ({
     const link = continuations.link(run.id)
     const originalRun = link ? persistence.getRun(link.originalRunId) : null
     const previousRun = link ? persistence.getRun(link.previousRunId) : null
+    const precedingRun = persistence
+      .listRuns(thread.id)
+      .find((attempt) => attempt.id !== run.id && attempt.status !== "queued")
+    const unacceptedRequest =
+      !resumedFrom &&
+      precedingRun?.errorClass === "app_restart" &&
+      precedingRun.externalTurnId === null &&
+      precedingRun.requestMessageId !== request?.id
+        ? activePathMessage({ store, run: precedingRun })
+        : null
     // A session can be saved before the provider accepts the first turn. The bounded
     // carryover alone cannot deliver that request's full text or attachments after a restart.
     const originalRequest =
@@ -840,18 +910,24 @@ export const createRuntimeEngine = ({
       ? [continuationPrompt(resumedFrom), originalRequest ? `Original request:\n${originalRequest.text}` : null]
           .filter(Boolean)
           .join("\n\n")
-      : (request?.text ?? "")
+      : [
+          unacceptedRequest ? `Original request (interrupted before acceptance):\n${unacceptedRequest.text}` : null,
+          request?.text,
+        ]
+          .filter(Boolean)
+          .join("\n\n")
     const carryover = thread.carryoverNote
     if (carryover) store.updateThread({ threadId: thread.id, patch: { carryoverNote: null } })
     const toolSummary = tools.summary(store, thread.id, request?.id)
     const inputText = [carryover, toolSummary, requestText].filter(Boolean).join("\n\n")
+    const requestParts = unacceptedRequest
+      ? [...unacceptedRequest.parts, ...(request?.parts ?? [])]
+      : ((originalRequest ?? request)?.parts ?? [])
     const input: Array<TextPart | Extract<MessagePart, { type: "image" }>> = request
       ? [
           { type: "text", text: inputText },
-          ...csvInput({ kernel, parts: (originalRequest ?? request).parts }),
-          ...(originalRequest ?? request).parts.filter(
-            (part): part is Extract<MessagePart, { type: "image" }> => part.type === "image",
-          ),
+          ...csvInput({ kernel, parts: requestParts }),
+          ...requestParts.filter((part): part is Extract<MessagePart, { type: "image" }> => part.type === "image"),
         ]
       : [{ type: "text", text: inputText }]
     const { cwd, projectDataDir } =
@@ -879,9 +955,32 @@ export const createRuntimeEngine = ({
       mcpCommand: mcp.command,
       mcpArgs: mcp.args,
     })
+    // Older versions saved the first session only as a per-run resume point.
+    // Adopt it for a manual follow-up as well as for automatic continuations.
+    if (!persistence.getActiveSession({ threadId: thread.id, provider: bot.provider })) {
+      if (precedingRun?.provider === bot.provider && precedingRun.errorClass === "app_restart")
+        adoptResumeSession(precedingRun)
+    }
     const previousSession = persistence.getActiveSession({ threadId: thread.id, provider: bot.provider })
     let session = previousSession
     let handoffPacket: string | null = null
+    const restoreContext = (reason: string): void => {
+      if (!handoffPacket)
+        state.replyParentId =
+          notice({
+            store,
+            run,
+            parentId: state.replyParentId ?? run.requestMessageId ?? thread.activeLeafId ?? run.id,
+            part: {
+              type: "notice",
+              level: "info",
+              code: "context_restored",
+              text: "O contexto da conversa foi recuperado do histórico salvo.",
+            },
+          }) ?? state.replyParentId
+      handoffPacket = buildHandoffPacket({ kernel, thread, reason })
+    }
+    if (unacceptedRequest) restoreContext("app restarted before the original turn was accepted")
     const previousAttempt =
       run.trigger === "retry"
         ? persistence
@@ -893,17 +992,18 @@ export const createRuntimeEngine = ({
       // The persisted transcript is the reliable context after reopening the app.
       if (session) persistence.markSession({ id: session.id, state: "replaced" })
       session = null
+      restoreContext("app restarted during the previous turn")
       handoffPacket = bounded({
         value: [
           "Continue from the partial transcript. Check the recorded work and current state before repeating actions; finish the user's original request.",
-          buildHandoffPacket({ kernel, thread, reason: "app restarted during the previous turn" }),
+          handoffPacket,
         ].join("\n"),
         max: 32_000,
       })
     }
     if (session && session.fingerprint !== mcpFingerprint.hash && session.fingerprint !== "imported") {
       persistence.markSession({ id: session.id, state: "replaced" })
-      handoffPacket = buildHandoffPacket({ kernel, thread, reason: "session fingerprint changed" })
+      restoreContext("session fingerprint changed")
       notice({
         store,
         run,
@@ -917,6 +1017,14 @@ export const createRuntimeEngine = ({
       })
       session = null
     }
+    if (
+      !session &&
+      !handoffPacket &&
+      store
+        .activePath({ threadId: thread.id })
+        .some((message) => message.id !== request?.id && (message.role === "user" || message.role === "assistant"))
+    )
+      restoreContext("native session unavailable")
     const baseEnvironment = bot.machine === "vm" ? {} : environment?.PATH ? environment : await kernel.shellEnv()
     const env = buildChildEnv({
       base: baseEnvironment,
@@ -1066,7 +1174,7 @@ export const createRuntimeEngine = ({
           !controller.signal.aborted
         ) {
           persistence.markSession({ id: session.id, state: "failed" })
-          handoffPacket = buildHandoffPacket({ kernel, thread, reason: "native session could not be resumed" })
+          restoreContext("native session could not be resumed")
           session = null
           providerResult = await invokeWithRetry()
         }
@@ -1113,18 +1221,19 @@ export const createRuntimeEngine = ({
     if (result.success) {
       state.externalSessionId = state.externalSessionId ?? result.externalSessionId
       state.rolloutPath = state.rolloutPath ?? result.rolloutPath
-      const sessionRow = session ?? {
-        id: kernel.newId(),
-        threadId: thread.id,
-        provider: bot.provider,
-        externalSessionId: state.externalSessionId,
-        rolloutPath: state.rolloutPath,
-        fingerprint: mcpFingerprint.hash,
-        state: "active",
-        model: bot.model,
-        createdAt: Date.now(),
-        lastUsedAt: Date.now(),
-      }
+      const sessionRow = persistence.getActiveSession({ threadId: thread.id, provider: bot.provider }) ??
+        session ?? {
+          id: kernel.newId(),
+          threadId: thread.id,
+          provider: bot.provider,
+          externalSessionId: state.externalSessionId,
+          rolloutPath: state.rolloutPath,
+          fingerprint: mcpFingerprint.hash,
+          state: "active",
+          model: bot.model,
+          createdAt: Date.now(),
+          lastUsedAt: Date.now(),
+        }
       persistence.saveSession({
         ...sessionRow,
         externalSessionId: state.externalSessionId,
@@ -1776,6 +1885,26 @@ export const createRuntimeEngine = ({
   const listRoutines = (botId?: Id): Array<Routine> => persistence.listRoutines(botId)
   const listRoutineRuns = (routineId: Id): Array<RoutineRun> => persistence.listRoutineRuns(routineId)
 
+  // A group routine posts into one of the group's conversations; a bot routine only into the bot's own.
+  const routineTargetError = (
+    input: Pick<RoutineCreate, "botId" | "continuity" | "resultsThreadId" | "groupId">,
+  ): string | null => {
+    const store = kernel.services.use("store.api")
+    const thread = input.resultsThreadId ? store?.getThread({ threadId: input.resultsThreadId }) : null
+    if (!input.groupId) {
+      if (input.resultsThreadId && (thread?.botId !== input.botId || thread.groupId))
+        return "Results conversation must belong to this bot"
+      return null
+    }
+    const group = createGroupStore(kernel).get(input.groupId)
+    if (!group) return "Group not found"
+    if (!group.memberIds.includes(input.botId)) return "The routine's bot must be a member of the group"
+    if (input.continuity === "main-thread") return "A group routine posts into a group conversation"
+    if (input.resultsThreadId && (thread?.groupId !== group.id || thread.groupThreadId))
+      return "Results conversation must belong to this group"
+    return null
+  }
+
   const createRoutine = ({
     input,
     forceDisabled,
@@ -1786,10 +1915,8 @@ export const createRuntimeEngine = ({
     const store = kernel.services.use("store.api")
     if (!store?.getBot({ botId: input.botId }))
       return { success: false, errorCode: "BOT_NOT_FOUND", error: "Bot not found" }
-    const validation = routineError(input)
+    const validation = routineError(input) ?? routineTargetError(input)
     if (validation) return { success: false, errorCode: "INVALID_ARGS", error: validation }
-    if (input.resultsThreadId && store.getThread({ threadId: input.resultsThreadId })?.botId !== input.botId)
-      return { success: false, errorCode: "INVALID_ARGS", error: "Results conversation must belong to this bot" }
     const now = Date.now()
     const routine: Routine = {
       id: kernel.newId(),
@@ -1801,6 +1928,7 @@ export const createRuntimeEngine = ({
       enabled: forceDisabled ? false : input.enabled,
       continuity: input.continuity,
       resultsThreadId: input.resultsThreadId,
+      groupId: input.groupId,
       timeoutMinutes: input.timeoutMinutes,
       overlap: input.overlap,
       catchUpMinutes: input.catchUpMinutes,
@@ -1831,6 +1959,8 @@ export const createRuntimeEngine = ({
       return { success: false, errorCode: "NOT_OWNED", error: "This routine belongs to another bot" }
     if (fromTool && patch.enabled === true)
       return { success: false, errorCode: "INVALID_ARGS", error: "Agents cannot enable routines" }
+    if (fromTool && patch.groupId !== undefined && patch.groupId !== routine.groupId)
+      return { success: false, errorCode: "INVALID_ARGS", error: "Agents cannot change a routine's group" }
     const next = { ...routine, ...patch, id: routine.id, botId: routine.botId, updatedAt: Date.now() }
     // A changed task or destination needs a new explicit human activation.
     const reviewedFields = [
@@ -1839,13 +1969,14 @@ export const createRuntimeEngine = ({
       "timezone",
       "continuity",
       "resultsThreadId",
+      "groupId",
       "timeoutMinutes",
       "catchUpMinutes",
       "overlap",
     ] as const
     if (patch.enabled !== true && reviewedFields.some((field) => next[field] !== routine[field])) next.enabled = false
 
-    const validation = routineError({
+    const candidate: RoutineCreate = {
       botId: next.botId,
       name: next.name,
       prompt: next.prompt,
@@ -1854,16 +1985,13 @@ export const createRuntimeEngine = ({
       enabled: next.enabled,
       continuity: next.continuity,
       resultsThreadId: next.resultsThreadId,
+      groupId: next.groupId,
       timeoutMinutes: next.timeoutMinutes,
       overlap: next.overlap,
       catchUpMinutes: next.catchUpMinutes,
-    })
+    }
+    const validation = routineError(candidate) ?? routineTargetError(candidate)
     if (validation) return { success: false, errorCode: "INVALID_ARGS", error: validation }
-    if (
-      next.resultsThreadId &&
-      kernel.services.use("store.api")?.getThread({ threadId: next.resultsThreadId })?.botId !== next.botId
-    )
-      return { success: false, errorCode: "INVALID_ARGS", error: "Results conversation must belong to this bot" }
     if (!next.enabled) next.nextRunAt = null
     else if (!routine.enabled || next.cron !== routine.cron || next.timezone !== routine.timezone) {
       const parsed = parseCron(next.cron)
@@ -1938,6 +2066,9 @@ export const createRuntimeEngine = ({
         errorCode: "INVALID_ARGS",
         error: `A rotina “${routine.name}” está pausada ou o runtime foi encerrado.`,
       }
+    // Checked before a run row exists, so a removed member never leaves a slot stuck as scheduled.
+    const targetError = routineTargetError(routine)
+    if (targetError) return { success: false, errorCode: "INVALID_ARGS", error: targetError }
     const history = persistence.listRoutineRuns(routine.id)
     if (triggerSource === "manual") {
       const duplicate = history.find(
@@ -1988,9 +2119,23 @@ export const createRuntimeEngine = ({
     if (!inserted.success) return { success: false, errorCode: "INVALID_ARGS", error: inserted.error }
     const bot = store.getBot({ botId: routine.botId })
     if (!bot) return { success: false, errorCode: "NOT_FOUND", error: "Bot not found" }
+    const group = routine.groupId ? createGroupStore(kernel).get(routine.groupId) : null
     let threadId: Id | null = null
     if (routine.continuity === "main-thread") threadId = bot.mainThreadId
     else if (routine.continuity === "results-thread") threadId = routine.resultsThreadId
+    if (!threadId && group) {
+      const created = store.createThread({
+        botId: group.memberIds[0] ?? bot.id,
+        kind: "chat",
+        title: formatRoutineTitle({ name: routine.name, at: scheduledFor, timezone: routine.timezone }),
+        groupId: group.id,
+      })
+      if (!created.success)
+        return { success: false, errorCode: "THREAD_NOT_FOUND", error: "Unable to create routine thread" }
+      threadId = created.thread.id
+      if (routine.continuity === "results-thread")
+        persistence.updateRoutine({ ...routine, resultsThreadId: threadId, updatedAt: Date.now() })
+    }
     if (!threadId) {
       const threadArgs = {
         botId: bot.id,
@@ -2024,13 +2169,29 @@ export const createRuntimeEngine = ({
     })
     if (!messageResult.success)
       return { success: false, errorCode: "THREAD_NOT_FOUND", error: "Unable to insert routine prompt" }
-    const run = enqueue({
+    const request = {
       threadId,
       requestMessageId: messageResult.message.id,
-      trigger: "routine",
+      trigger: "routine" as const,
       routineRunId: scheduled.id,
-    })
-    if (!run.success) return run
+    }
+    // The group runtime routes the prompt to its members or coordinator, exactly like a user message.
+    const groupRuntime = group ? kernel.services.use("groups.runtime") : null
+    if (group && !groupRuntime)
+      return { success: false, errorCode: "THREAD_NOT_FOUND", error: "Group runtime unavailable" }
+    const run = groupRuntime ? groupRuntime.enqueue(request) : enqueue(request)
+    if (!run.success) {
+      const failed: RoutineRun = {
+        ...scheduled,
+        status: "failed",
+        threadId,
+        summary: run.error,
+        finishedAt: Date.now(),
+      }
+      persistence.updateRoutineRun(failed)
+      kernel.publish({ type: "routine.updated", routine, lastRun: failed })
+      return run
+    }
     const running: RoutineRun = { ...scheduled, status: "running", threadId, runId: run.run.id, startedAt: Date.now() }
     persistence.updateRoutineRun(running)
     kernel.publish({ type: "routine.updated", routine, lastRun: running })
@@ -2075,6 +2236,7 @@ export const createRuntimeEngine = ({
   const shutdown = (): Promise<void> => {
     if (shutdownPromise) return shutdownPromise
     shuttingDown = true
+    unsubscribeGroupTurns()
     for (const state of states.values()) {
       if (state.outputTimer) clearTimeout(state.outputTimer)
       state.outputTimer = null

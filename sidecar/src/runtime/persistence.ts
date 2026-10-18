@@ -116,6 +116,7 @@ const toRoutine = (value: unknown): Routine | null => {
     enabled: integer(row, "enabled") === 1,
     continuity: text(row, "continuity") as Routine["continuity"],
     resultsThreadId: nullableText(row, "results_thread_id"),
+    groupId: nullableText(row, "group_id"),
     timeoutMinutes: integer(row, "timeout_minutes", 30),
     overlap: text(row, "overlap", "skip") as Routine["overlap"],
     catchUpMinutes: integer(row, "catch_up_minutes", 30),
@@ -390,10 +391,11 @@ export const createRuntimePersistence = ({ database }: { database: unknown }): R
     if (!db) return
     try {
       db.query(
-        `INSERT INTO routines (id, bot_id, name, prompt, cron, timezone, enabled, continuity, results_thread_id, timeout_minutes, overlap, catch_up_minutes, next_run_at, source, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO routines (id, bot_id, name, prompt, cron, timezone, enabled, continuity, results_thread_id, group_id, timeout_minutes, overlap, catch_up_minutes, next_run_at, source, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET bot_id=excluded.bot_id, name=excluded.name, prompt=excluded.prompt, cron=excluded.cron,
          timezone=excluded.timezone, enabled=excluded.enabled, continuity=excluded.continuity, results_thread_id=excluded.results_thread_id,
+         group_id=excluded.group_id,
          timeout_minutes=excluded.timeout_minutes, overlap=excluded.overlap, catch_up_minutes=excluded.catch_up_minutes,
          next_run_at=excluded.next_run_at, source=excluded.source, updated_at=excluded.updated_at`,
       ).run(
@@ -406,6 +408,7 @@ export const createRuntimePersistence = ({ database }: { database: unknown }): R
         routine.enabled ? 1 : 0,
         routine.continuity,
         routine.resultsThreadId,
+        routine.groupId,
         routine.timeoutMinutes,
         routine.overlap,
         routine.catchUpMinutes,

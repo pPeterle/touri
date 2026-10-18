@@ -9,7 +9,6 @@ import { createStandingGrantStore } from "../../src/approvals/grants"
 import { mcpStartupChecks } from "../../src/doctor/mcp"
 import { createKernel } from "../../src/kernel"
 import { openDatabase } from "../../src/kernel/db"
-import { hostFolderAccessAvailable } from "../../src/kernel/folder-capability"
 import { init as initNotify } from "../../src/notify"
 import { createCodexAdapter } from "../../src/runtime/codex/adapter"
 import { createRuntimeEngine } from "../../src/runtime/engine"
@@ -219,6 +218,7 @@ test("pausing a cached routine prevents cron attempts and survives runtime repla
         enabled: true,
         continuity: "main-thread",
         resultsThreadId: null,
+        groupId: null,
         timeoutMinutes: 30,
         overlap: "skip",
         catchUpMinutes: 30,
@@ -699,6 +699,7 @@ test("manual routine completion publishes its final state without a reload", asy
         enabled: false,
         continuity: "main-thread",
         resultsThreadId: null,
+        groupId: null,
         timeoutMinutes: 30,
         overlap: "skip",
         catchUpMinutes: 30,
@@ -1487,6 +1488,7 @@ test.serial(
         enabled: true,
         continuity: "main-thread" as const,
         resultsThreadId: null,
+        groupId: null,
         timeoutMinutes: 30,
         overlap: "skip" as const,
         catchUpMinutes: 30,
@@ -1579,6 +1581,7 @@ test.serial("routine updates reject a caller from another bot", async () => {
         enabled: false,
         continuity: "new-thread",
         resultsThreadId: null,
+        groupId: null,
         timeoutMinutes: 30,
         overlap: "skip",
         catchUpMinutes: 30,
@@ -1625,6 +1628,7 @@ test.serial("routine timeout fails both the turn and routine run with a bounded 
         enabled: false,
         continuity: "main-thread",
         resultsThreadId: null,
+        groupId: null,
         timeoutMinutes: 1,
         overlap: "skip",
         catchUpMinutes: 30,
@@ -1678,6 +1682,7 @@ test.serial("scheduled results-thread routines keep the same thread across slots
         enabled: true,
         continuity: "results-thread",
         resultsThreadId: null,
+        groupId: null,
         timeoutMinutes: 30,
         overlap: "skip",
         catchUpMinutes: 30,
@@ -1757,6 +1762,7 @@ test.serial("restart interrupts an in-flight routine run and does not block the 
         enabled: true,
         continuity: "main-thread",
         resultsThreadId: null,
+        groupId: null,
         timeoutMinutes: 30,
         overlap: "skip",
         catchUpMinutes: 30,
@@ -1937,6 +1943,7 @@ test.serial(
           enabled: true,
           continuity: "main-thread",
           resultsThreadId: null,
+          groupId: null,
           timeoutMinutes: 1,
           overlap: "skip",
           catchUpMinutes: 30,
@@ -2234,6 +2241,7 @@ test.serial(
           enabled: false,
           continuity: "main-thread",
           resultsThreadId: null,
+          groupId: null,
           timeoutMinutes: 1,
           overlap: "queue",
           catchUpMinutes: 30,
@@ -2442,9 +2450,8 @@ test.serial("a local bot uses its selected provider profile for authentication a
     await run("profile home")
     const homes = readFileSync(envLog, "utf8").trim().split("\n")
     expect(homes[0]).not.toContain("provider-profiles")
-    expect(homes.at(-1)).toBe(
-      process.platform === "linux" && hostFolderAccessAvailable() ? join(bot.homeDir, ".touri-claude") : profile,
-    )
+    // No folder grants: the provider uses the selected profile directly on every host.
+    expect(homes.at(-1)).toBe(profile)
     expect(
       JSON.parse(
         readFileSync(join(value.runtime.kernel.paths.runDir, "claude", `${value.thread.id}.settings.json`), "utf8"),
@@ -2520,6 +2527,7 @@ test.serial("server routines run without browser clients and persist downtime an
         enabled: true,
         continuity: "results-thread",
         resultsThreadId: value.thread.id,
+        groupId: null,
         timeoutMinutes: 30,
         overlap: "skip",
         catchUpMinutes: 30,
@@ -2581,6 +2589,7 @@ test.serial("editing a routine task or destination pauses it until a new explici
         enabled: true,
         continuity: "main-thread",
         resultsThreadId: null,
+        groupId: null,
         timeoutMinutes: 30,
         overlap: "skip",
         catchUpMinutes: 30,
@@ -2623,6 +2632,7 @@ test.serial("newly activated routines wait for a future slot instead of replayin
         enabled: true,
         continuity: "main-thread",
         resultsThreadId: null,
+        groupId: null,
         timeoutMinutes: 30,
         overlap: "skip",
         catchUpMinutes: 30,
@@ -2648,6 +2658,7 @@ const routineForDeletion = (value: Fixture) => {
       enabled: true,
       continuity: "main-thread",
       resultsThreadId: null,
+      groupId: null,
       timeoutMinutes: 30,
       overlap: "queue",
       catchUpMinutes: 30,

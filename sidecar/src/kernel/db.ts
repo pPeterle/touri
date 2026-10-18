@@ -26,10 +26,11 @@ import responseActivitySql from "./migrations/0020.sql" with { type: "text" }
 import workspaceActivitySql from "./migrations/0021.sql" with { type: "text" }
 import transcriptReferencesSql from "./migrations/0022.sql" with { type: "text" }
 import streamWriterSql from "./migrations/0023.sql" with { type: "text" }
+import groupRoutinesSql from "./migrations/0024.sql" with { type: "text" }
 import { withSuspendedSchemaObjects } from "./schema-rebuild"
 import { applyUpgradeBaselines } from "./upgradeBaselines"
 
-export const SCHEMA_VERSION = 23
+export const SCHEMA_VERSION = 24
 
 const FREE_PAGE_RATIO_LIMIT = 0.2
 
@@ -175,6 +176,11 @@ export const openDatabase = ({ filename }: { filename: string }): Database => {
     if (!database.query("SELECT 1 FROM schema_meta WHERE key = 'stream_writer_version' AND value = '2'").get())
       database.exec(streamWriterSql)
     database.exec("UPDATE schema_meta SET value = '23' WHERE key = 'schema_version'")
+  })()
+  database.transaction(() => {
+    const columns = database.query("PRAGMA table_info(routines)").all() as Array<{ name: string }>
+    if (!columns.some((column) => column.name === "group_id")) database.exec(groupRoutinesSql)
+    database.exec("UPDATE schema_meta SET value = '24' WHERE key = 'schema_version'")
   })()
   return database
 }

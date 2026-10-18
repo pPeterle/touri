@@ -363,6 +363,7 @@ export type NoticePart = {
     | 'run_failed'
     | 'run_canceled'
     | 'session_replaced'
+    | 'context_restored'
     | 'compaction'
     | 'routine_run'
     | 'imported'
@@ -437,6 +438,8 @@ export type Routine = {
   enabled: boolean
   continuity: RoutineContinuity
   resultsThreadId: Id | null
+  /** When set, the prompt is posted into a conversation of this group, which routes it like a user message. */
+  groupId: Id | null
   timeoutMinutes: number
   overlap: 'skip' | 'queue'
   catchUpMinutes: number
@@ -1161,7 +1164,7 @@ export type ServiceMap = {
   'bots.configureAccess': (input: { botId: Id; patch: Partial<Pick<Bot, 'projectId' | 'folders' | 'browserEnabled' | 'browser' | 'computerUse'>> }) => Result<{ bot: Bot }, 'NOT_FOUND' | 'INVALID_ARGS' | 'MACHINE_PROJECT_CHANGE'>
   'diagnostics.errors': () => Array<{ code: string; at: number }>
   'groups.runtime': {
-    enqueue: ServiceMap['runtime.enqueue']
+    enqueue: (args: { threadId: Id; requestMessageId: Id; trigger: RunTrigger; routineRunId?: Id }) => Result<{ run: Run }, 'THREAD_NOT_FOUND' | 'BOT_PAUSED'>
     cancel: (id: Id) => boolean
     retry: (id: Id) => Result<{ run: Run }, 'THREAD_NOT_FOUND' | 'BOT_PAUSED' | 'CONFLICT'> | null
     listRuns: (threadId: Id) => Array<Run>
