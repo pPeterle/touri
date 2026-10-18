@@ -2,6 +2,7 @@
 export type FakeTelegramCall = { method: string; params: Record<string, unknown> }
 
 export const createFakeTelegram = ({ token, username = "touri_test_bot" }: { token: string; username?: string }) => {
+  let responder: ((call: FakeTelegramCall) => Response | Promise<Response> | null) | null = null
   const updates: Array<Record<string, unknown>> = []
   const calls: Array<FakeTelegramCall> = []
   let nextUpdateId = 1
@@ -14,7 +15,10 @@ export const createFakeTelegram = ({ token, username = "touri_test_bot" }: { tok
       if (prefix !== `bot${token}`)
         return Response.json({ ok: false, error_code: 401, description: "Unauthorized" }, { status: 401 })
       const params = (await request.json().catch(() => ({}))) as Record<string, unknown>
-      calls.push({ method: method ?? "", params })
+      const call = { method: method ?? "", params }
+      calls.push(call)
+      const custom = responder?.(call)
+      if (custom) return custom
       if (method === "getMe") return Response.json({ ok: true, result: { id: 1, is_bot: true, username } })
       if (method === "getUpdates") {
         const offset = Number(params.offset ?? 0)
@@ -34,6 +38,9 @@ export const createFakeTelegram = ({ token, username = "touri_test_bot" }: { tok
   return {
     url: `http://127.0.0.1:${server.port}`,
     calls,
+    respond: (handler: typeof responder) => {
+      responder = handler
+    },
     sent: (method = "sendMessage") => calls.filter((call) => call.method === method),
     message: ({
       from = 42,
@@ -56,10 +63,27 @@ export const createFakeTelegram = ({ token, username = "touri_test_bot" }: { tok
         },
       })
     },
-    tap: ({ from = 42, name = "Ana", data }: { from?: number; name?: string; data: string }) => {
+    tap: ({
+      from = 42,
+      name = "Ana",
+      data,
+      chatId = from,
+      promptMessageId = messageId,
+    }: {
+      from?: number
+      name?: string
+      data: string
+      chatId?: number
+      promptMessageId?: number
+    }) => {
       updates.push({
         update_id: nextUpdateId++,
-        callback_query: { id: `cb-${nextUpdateId}`, from: user(from, name), data },
+        callback_query: {
+          id: `cb-${nextUpdateId}`,
+          from: user(from, name),
+          data,
+          message: { message_id: promptMessageId, chat: { id: chatId, type: "private" } },
+        },
       })
     },
     stop: () => server.stop(true),

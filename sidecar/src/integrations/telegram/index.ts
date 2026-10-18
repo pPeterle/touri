@@ -32,6 +32,19 @@ export const createTelegramIntegrations = ({
   const statuses = new Map<Id, TelegramIntegrationStatus>()
   // Serializes restarts per bot so a quick toggle never leaves two pollers on one token.
   const pending = new Map<Id, Promise<void>>()
+  let stopping = false
+  const serialize = <T>(botId: Id, task: () => Promise<T>): Promise<T> => {
+    const result = (pending.get(botId) ?? Promise.resolve()).then(task)
+    const settled = result.then(
+      () => undefined,
+      () => undefined,
+    )
+    pending.set(botId, settled)
+    void settled.then(() => {
+      if (pending.get(botId) === settled) pending.delete(botId)
+    })
+    return result
+  }
 
   const readToken = async (botId: Id): Promise<string | null> => {
     const saved = await kernel.callHost("keychain.get", { account: tokenAccount(botId) })
@@ -47,34 +60,28 @@ export const createTelegramIntegrations = ({
     await bridge?.stop()
   }
 
-  const restart = (botId: Id): Promise<void> => {
-    const next = (pending.get(botId) ?? Promise.resolve()).then(async () => {
-      await stop(botId)
-      if (!store.config(botId).enabled || !kernel.services.use("store.api")?.getBot({ botId })) return
-      const token = await readToken(botId)
-      if (!token) {
-        statuses.set(botId, { state: "error", username: null, error: "Salve o token do bot do Telegram." })
-        return
-      }
-      const bridge = createTelegramBridge({
-        kernel,
-        botId,
-        token,
-        store,
-        ...(apiBase ? { apiBase } : {}),
-        ...(pollTimeoutSec === undefined ? {} : { pollTimeoutSec }),
-        onStatus: (status) => {
-          if (bridges.get(botId) === bridge) statuses.set(botId, status)
-        },
-      })
-      bridges.set(botId, bridge)
-      bridge.start()
-    })
-    pending.set(
+  const restart = async (botId: Id): Promise<void> => {
+    await stop(botId)
+    if (stopping || !store.config(botId).enabled || !kernel.services.use("store.api")?.getBot({ botId })) return
+    const token = await readToken(botId)
+    if (stopping || !kernel.services.use("store.api")?.getBot({ botId })) return
+    if (!token) {
+      statuses.set(botId, { state: "error", username: null, error: "Salve o token do bot do Telegram." })
+      return
+    }
+    const bridge = createTelegramBridge({
+      kernel,
       botId,
-      next.catch(() => undefined),
-    )
-    return next
+      token,
+      store,
+      ...(apiBase ? { apiBase } : {}),
+      ...(pollTimeoutSec === undefined ? {} : { pollTimeoutSec }),
+      onStatus: (status) => {
+        if (bridges.get(botId) === bridge) statuses.set(botId, status)
+      },
+    })
+    bridges.set(botId, bridge)
+    bridge.start()
   }
 
   const describe = async (botId: Id): Promise<TelegramIntegration> => {
@@ -88,6 +95,7 @@ export const createTelegramIntegrations = ({
   }
 
   const update = async (botId: Id, body: unknown): Promise<RouteResponse> => {
+    if (stopping) return fail(503, "UNAVAILABLE", "A integração está sendo desligada.")
     if (!kernel.services.use("store.api")?.getBot({ botId })) return fail(404, "NOT_FOUND", "Bot não encontrado")
     const input = typeof body === "object" && body !== null ? (body as Record<string, unknown>) : {}
     if (input.token !== undefined && input.token !== null && typeof input.token !== "string")
@@ -95,11 +103,22 @@ export const createTelegramIntegrations = ({
     const token = typeof input.token === "string" ? input.token.trim() : input.token
     if (typeof token === "string" && !TOKEN.test(token))
       return fail(400, "INVALID_ARGS", "O token não parece um token do BotFather.")
-    if (typeof token === "string") {
-      kernel.addRedactionValue(token)
-      const saved = await kernel.callHost("keychain.set", { account: tokenAccount(botId), value: token })
-      if (!saved.success) return fail(500, "SECRET_UNAVAILABLE", "Não foi possível salvar o token.")
-    } else if (token === null) await kernel.callHost("keychain.delete", { account: tokenAccount(botId) })
+    if (token !== undefined) {
+      const previous = await kernel.callHost("keychain.get", { account: tokenAccount(botId) })
+      if (!previous.success) return fail(500, "SECRET_UNAVAILABLE", "Não foi possível ler o token salvo.")
+      await stop(botId)
+      if (typeof token === "string") kernel.addRedactionValue(token)
+      const saved =
+        typeof token === "string"
+          ? await kernel.callHost("keychain.set", { account: tokenAccount(botId), value: token })
+          : await kernel.callHost("keychain.delete", { account: tokenAccount(botId) })
+      if (!saved.success) {
+        await restart(botId)
+        return fail(500, "SECRET_UNAVAILABLE", "Não foi possível salvar o token.")
+      }
+      // A different account has its own update IDs and must never inherit another account's chats.
+      if (previous.value.value !== token) store.resetState(botId)
+    }
     const current = store.config(botId)
     const next = normalizeConfig({
       ...current,
@@ -111,7 +130,11 @@ export const createTelegramIntegrations = ({
     })
     store.saveConfig(botId, next)
     // A changed allowlist or toggle applies on the next update; only the token or switch needs a reconnect.
-    if (token !== undefined || next.enabled !== current.enabled || (next.enabled && !bridges.has(botId)))
+    if (
+      token !== undefined ||
+      next.enabled !== current.enabled ||
+      (next.enabled && (!bridges.has(botId) || statuses.get(botId)?.state === "error"))
+    )
       await restart(botId)
     return { status: 200, json: { telegram: await describe(botId) } }
   }
@@ -131,26 +154,38 @@ export const createTelegramIntegrations = ({
       {
         method: "PUT",
         path: "/bots/:id/integrations/telegram",
-        handler: async ({ params, body }) => update(params.id ?? "", body),
+        handler: async ({ params, body }) => serialize(params.id ?? "", () => update(params.id ?? "", body)),
       },
     ],
   }
 
   const unsubscribe = kernel.subscribe(({ event }) => {
     if (event.type !== "bot.deleted") return
-    void stop(event.botId).then(async () => {
+    void serialize(event.botId, async () => {
+      await stop(event.botId)
       store.remove(event.botId)
+      statuses.delete(event.botId)
       await kernel.callHost("keychain.delete", { account: tokenAccount(event.botId) })
-    })
+    }).catch((error) =>
+      kernel.log({
+        level: "error",
+        module: "telegram",
+        msg: "Falha ao remover integração",
+        data: { error: kernel.redact(String(error)) },
+      }),
+    )
   })
 
   return {
     routes,
     start: async (): Promise<void> => {
-      await Promise.all(store.configuredBots().map((botId) => restart(botId)))
+      await Promise.all(store.configuredBots().map((botId) => serialize(botId, () => restart(botId))))
     },
     stopAll: async (): Promise<void> => {
+      stopping = true
       unsubscribe()
+      await Promise.all([...bridges.keys()].map((botId) => stop(botId)))
+      await Promise.all([...pending.values()])
       await Promise.all([...bridges.keys()].map((botId) => stop(botId)))
     },
     status: (botId: Id) => statuses.get(botId) ?? OFF,

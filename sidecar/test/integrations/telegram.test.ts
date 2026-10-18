@@ -6,6 +6,8 @@ import { join } from "node:path"
 import type { Bot, Kernel, NotificationRecord, Routine, RoutineRun, Run, TelegramIntegration } from "@touri/contracts"
 import { createFakeTelegram } from "../../../test/fakes/fake-telegram"
 import { createTelegramIntegrations } from "../../src/integrations/telegram"
+import { createTelegramApi } from "../../src/integrations/telegram/api"
+import { createTelegramStore, tokenAccount } from "../../src/integrations/telegram/store"
 import { splitMessage } from "../../src/integrations/telegram/text"
 import { createKernel } from "../../src/kernel"
 import { createRuntimePersistence } from "../../src/runtime/persistence"
@@ -143,7 +145,22 @@ const fixture = async ({ token = TOKEN }: { token?: string } = {}) => {
     persistence.saveRun(run)
     kernel.publish({ type: "run.updated", run: { ...run } })
   }
-  return { kernel, store, fake, runs, canceled, answers, resolved, bot, telegram, configure, finish, vault, request }
+  return {
+    kernel,
+    store,
+    fake,
+    runs,
+    canceled,
+    answers,
+    resolved,
+    bot,
+    telegram,
+    configure,
+    finish,
+    vault,
+    request,
+    integrations,
+  }
 }
 
 const notification = (patch: Partial<NotificationRecord>): NotificationRecord => ({
@@ -288,6 +305,11 @@ test("routine results reach the home chat only when forwarding is on", async () 
   expect(f.fake.sent()[0]?.params).toMatchObject({ chat_id: "42", text: "E-mails das 8h: 3 e-mails importantes" })
   await Bun.sleep(30)
   expect(f.fake.sent()).toHaveLength(1)
+  await f.configure({ enabled: false })
+  await f.configure({ enabled: true })
+  f.kernel.publish({ type: "routine.updated", routine, lastRun: finished("run-b") })
+  await Bun.sleep(30)
+  expect(f.fake.sent()).toHaveLength(1)
 })
 
 test("a revoked token stops polling with a clear status, and invalid input is rejected", async () => {
@@ -323,4 +345,264 @@ test("splitMessage keeps short text whole and never breaks a code fence or the l
   expect(chunks.at(-1)).toContain("Depois")
   const wide = splitMessage("x".repeat(1200), 500)
   expect(wide.map((chunk) => chunk.length)).toEqual([500, 500, 200])
+})
+
+test("reconnecting cannot reuse an old approval button, and buttons are bound to their private message", async () => {
+  const f = await fixture()
+  await f.configure({ token: TOKEN, enabled: true, allowedUserIds: ["42", "77"] })
+  f.fake.message({ text: "Prepare uma ação" })
+  await until(() => f.runs.length === 1)
+  const publish = (requestId: string) =>
+    f.kernel.publish({
+      type: "notification.created",
+      notification: notification({ requestId, botId: f.bot.id, threadId: f.runs[0]?.threadId ?? null }),
+    })
+  const button = (index: number) => {
+    const markup = f.fake.sent()[index]?.params.reply_markup as {
+      inline_keyboard: Array<Array<{ callback_data: string }>>
+    }
+    return markup.inline_keyboard[0]?.[0]?.callback_data ?? ""
+  }
+  publish("old-request")
+  await until(() => f.fake.sent().length === 1)
+  const old = button(0)
+  await f.configure({ enabled: false })
+  await f.configure({ enabled: true })
+  publish("new-request")
+  await until(() => f.fake.sent().length === 2)
+  const current = button(1)
+  f.fake.tap({ data: old })
+  f.fake.tap({ from: 77, data: current })
+  f.fake.tap({ data: current.replace(/:y$/, ":other") })
+  await until(() => f.fake.sent("answerCallbackQuery").length === 3)
+  expect(f.answers).toEqual([])
+  expect(f.fake.sent("answerCallbackQuery").every((call) => call.params.text === "Pedido expirado.")).toBe(true)
+  expect(current).not.toBe(old)
+  f.fake.tap({ data: current })
+  await until(() => f.answers.length === 1)
+  expect(f.answers[0]?.approvalId).toBe("new-request")
+})
+
+test("removing a user prevents replies and approval notifications reaching their linked chat", async () => {
+  const f = await fixture()
+  await f.configure({ token: TOKEN, enabled: true, allowedUserIds: ["42"] })
+  f.fake.message({ text: "Comece" })
+  await until(() => f.runs.length === 1)
+  await f.configure({ allowedUserIds: [] })
+  const run = f.runs[0] as Run
+  f.finish(run, "Conteúdo privado")
+  f.kernel.publish({
+    type: "notification.created",
+    notification: notification({ botId: f.bot.id, threadId: run.threadId }),
+  })
+  await Bun.sleep(30)
+  expect(f.fake.sent()).toEqual([])
+})
+
+test("changing the token resets the account offset and chat links; saving the same token preserves them", async () => {
+  const f = await fixture()
+  await f.configure({ token: TOKEN, enabled: true, allowedUserIds: ["42"] })
+  f.fake.message({ text: "Conversa antiga" })
+  await until(() => f.runs.length === 1)
+  const store = createTelegramStore(f.kernel)
+  await until(() => store.state(f.bot.id).offset === 2)
+  const before = store.state(f.bot.id)
+  await f.configure({ token: TOKEN })
+  expect(store.state(f.bot.id)).toEqual(before)
+  await f.configure({ token: "987654321:AAAnotherTokenForTouriTests_123456" })
+  expect(store.state(f.bot.id)).toEqual({ offset: 0, chats: {}, lastRejected: null, routineRunIds: [] })
+  const sent = f.fake.sent().length
+  f.finish(f.runs[0] as Run, "Não encaminhar para outra conta")
+  await Bun.sleep(30)
+  expect(f.fake.sent()).toHaveLength(sent)
+})
+
+test("a redelivered message keeps the original journal parent and never reports a nonce conflict", async () => {
+  const f = await fixture()
+  await f.configure({ token: TOKEN, enabled: true, allowedUserIds: ["42"] })
+  f.fake.message({ text: "Uma vez só" })
+  await until(() => f.runs.length === 1)
+  const store = createTelegramStore(f.kernel)
+  await until(() => store.state(f.bot.id).offset === 2)
+  f.finish(f.runs[0] as Run, "Pronto")
+  await until(() => f.fake.sent().length === 1)
+  await f.configure({ enabled: false })
+  store.saveState(f.bot.id, { ...store.state(f.bot.id), offset: 0 })
+  await f.configure({ enabled: true })
+  await until(() => store.state(f.bot.id).offset === 2)
+  expect(f.runs).toHaveLength(1)
+  expect(f.fake.sent().map((call) => call.params.text)).toEqual(["Pronto"])
+})
+
+test("shutdown waits for pending restarts without creating another poller", async () => {
+  const f = await fixture()
+  createTelegramStore(f.kernel).saveConfig(f.bot.id, {
+    enabled: true,
+    allowedUserIds: ["42"],
+    homeChatId: null,
+    forwardRoutines: false,
+  })
+  f.vault.set(tokenAccount(f.bot.id), TOKEN)
+  const host = f.kernel.callHost
+  let reading = false
+  let release = () => {}
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  f.kernel.callHost = (async (method, input) => {
+    if (method === "keychain.get") {
+      reading = true
+      await blocked
+    }
+    return host(method, input)
+  }) as Kernel["callHost"]
+  const started = f.integrations.start()
+  await until(() => reading)
+  const stopped = f.integrations.stopAll()
+  release()
+  await Promise.all([started, stopped])
+  expect(f.fake.sent("getMe")).toEqual([])
+  expect(f.integrations.status(f.bot.id).state).toBe("off")
+})
+
+test("shutdown aborts an in-flight command reply before committing its update offset", async () => {
+  const f = await fixture()
+  await f.configure({ token: TOKEN, enabled: true, allowedUserIds: ["42"] })
+  f.fake.respond((call) => (call.method === "sendMessage" ? new Promise<Response>(() => {}) : null))
+  f.fake.message({ text: "/start" })
+  await until(() => f.fake.sent().length === 1)
+  await f.integrations.stopAll()
+  expect(createTelegramStore(f.kernel).state(f.bot.id).offset).toBe(0)
+})
+
+test("failed secret removal keeps the existing token and reports failure", async () => {
+  const f = await fixture()
+  await f.configure({ token: TOKEN })
+  const host = f.kernel.callHost
+  f.kernel.callHost = (async (method, input) =>
+    method === "keychain.delete"
+      ? { success: false, errorCode: "UNAVAILABLE", error: "Vault unavailable" }
+      : host(method, input)) as Kernel["callHost"]
+  const result = await f.request("PUT", `/bots/${f.bot.id}/integrations/telegram`, { token: null, enabled: false })
+  expect(result.status).toBe(500)
+  expect((await f.telegram()).tokenSaved).toBe(true)
+})
+
+test("Telegram requests have a deadline and abortable sends without exposing the token", async () => {
+  const f = await fixture()
+  f.fake.respond(() => new Promise<Response>(() => {}))
+  const api = createTelegramApi({ token: TOKEN, base: f.fake.url, timeoutMs: 20 })
+  await expect(api.sendMessage({ chat_id: "42", text: "oi" })).rejects.toThrow("network error")
+  const controller = new AbortController()
+  const cancelable = createTelegramApi({ token: TOKEN, base: f.fake.url, signal: controller.signal })
+  const sending = cancelable.sendMessage({ chat_id: "42", text: "oi" })
+  controller.abort()
+  await expect(sending).rejects.toThrow("network error")
+})
+
+test("message splitting handles large fences, closing markers and Unicode boundaries", () => {
+  for (const text of [
+    `antes\n${"`".repeat(501)}\nfim`,
+    `${"x".repeat(490)}\n\`\`\`ts\nconteúdo\n\`\`\``,
+    `\`\`\`ts\n${"x".repeat(480)}\n${"`".repeat(10)}`,
+    `\`\`\`ts\n${"😀".repeat(700)}\n\`\`\``,
+    `${"x".repeat(499)}😀${"y".repeat(600)}`,
+  ]) {
+    const chunks = splitMessage(text, 500)
+    expect(chunks.length).toBeGreaterThan(1)
+    for (const chunk of chunks) {
+      expect(chunk.length).toBeLessThanOrEqual(500)
+      expect(Array.from(chunk).every((char) => char.length !== 1 || !/[\uD800-\uDFFF]/.test(char))).toBe(true)
+    }
+  }
+  expect(() => splitMessage("hello", 0)).toThrow(RangeError)
+})
+
+test("an approval resolved during Telegram delivery stays expired and questions resolve as answers", async () => {
+  const f = await fixture()
+  await f.configure({ token: TOKEN, enabled: true, allowedUserIds: ["42"] })
+  f.fake.message({ text: "Uma pergunta" })
+  await until(() => f.runs.length === 1)
+  const notice = notification({ botId: f.bot.id, threadId: f.runs[0]?.threadId ?? null })
+  let release = (_response: Response) => {}
+  f.fake.respond((call) =>
+    call.method === "sendMessage"
+      ? new Promise<Response>((resolve) => {
+          release = resolve
+        })
+      : null,
+  )
+  f.kernel.publish({ type: "notification.created", notification: notice })
+  await until(() => f.fake.sent().length === 1)
+  f.kernel.publish({
+    type: "notification.resolved",
+    notification: { ...notice, resolvedAt: Date.now(), resolution: "allow" },
+  })
+  release(Response.json({ ok: true, result: { message_id: 501, chat: { id: 42, type: "private" } } }))
+  await until(() => f.fake.sent("editMessageText").some((call) => call.params.message_id === 501))
+  const markup = f.fake.sent()[0]?.params.reply_markup as { inline_keyboard: Array<Array<{ callback_data: string }>> }
+  f.fake.tap({ data: markup.inline_keyboard[0]?.[0]?.callback_data ?? "", promptMessageId: 501 })
+  await until(() => f.fake.sent("answerCallbackQuery").length === 1)
+  expect(f.answers).toEqual([])
+  f.fake.respond(null)
+  f.kernel.publish({
+    type: "notification.created",
+    notification: { ...notice, requestId: "question-1", kind: "question" },
+  })
+  await until(() => f.fake.sent().length === 2)
+  const questionMarkup = f.fake.sent()[1]?.params.reply_markup as {
+    inline_keyboard: Array<Array<{ callback_data: string }>>
+  }
+  f.fake.tap({ data: questionMarkup.inline_keyboard[0]?.[0]?.callback_data ?? "" })
+  await until(() => f.answers.length === 1)
+  expect(f.answers[0]).toMatchObject({ decision: "denied", message: "User answered: yes" })
+  expect(f.resolved.at(-1)).toEqual({ requestId: "question-1", resolution: "answer" })
+})
+
+test("deleting a bot while its token is being read cannot resurrect a bridge or its settings", async () => {
+  const f = await fixture()
+  const state = createTelegramStore(f.kernel)
+  state.saveConfig(f.bot.id, { enabled: true, allowedUserIds: ["42"], homeChatId: null, forwardRoutines: false })
+  f.vault.set(tokenAccount(f.bot.id), TOKEN)
+  const host = f.kernel.callHost
+  let reading = false
+  let release = () => {}
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  f.kernel.callHost = (async (method, input) => {
+    const result = await host(method, input)
+    if (method === "keychain.get") {
+      reading = true
+      await blocked
+    }
+    return result
+  }) as Kernel["callHost"]
+  const started = f.integrations.start()
+  await until(() => reading)
+  ;(f.kernel.db as Database).query("DELETE FROM bots WHERE id = ?").run(f.bot.id)
+  f.kernel.publish({ type: "bot.deleted", botId: f.bot.id })
+  release()
+  await started
+  await until(() => !f.vault.has(tokenAccount(f.bot.id)))
+  expect(f.fake.sent("getMe")).toEqual([])
+  expect(state.configuredBots()).not.toContain(f.bot.id)
+})
+
+test("long approval requests require the complete context in the app instead of truncated buttons", async () => {
+  const f = await fixture()
+  await f.configure({ token: TOKEN, enabled: true, allowedUserIds: ["42"] })
+  f.fake.message({ text: "Confira o pedido" })
+  await until(() => f.runs.length === 1)
+  f.kernel.publish({
+    type: "notification.created",
+    notification: notification({
+      botId: f.bot.id,
+      threadId: f.runs[0]?.threadId ?? null,
+      body: "ação longa ".repeat(500),
+    }),
+  })
+  await until(() => f.fake.sent().length === 1)
+  expect(f.fake.sent()[0]?.params.text).toBe("Este pedido é longo. Abra o touri para conferir e responder.")
+  expect(f.fake.sent()[0]?.params.reply_markup).toBeUndefined()
 })

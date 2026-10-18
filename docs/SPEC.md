@@ -409,9 +409,10 @@ state live in the `settings` table under `telegram:<botId>` and `telegram-state:
 feature needs no migration.
 
 The sidecar module `integrations/telegram` long-polls `getUpdates` with plain `fetch` and persists
-the offset after each update, so a restart neither replays nor drops messages. Only private chats
+the offset after processing each update. Retried messages use the durable send journal to avoid
+being enqueued twice. Only private chats
 from allowed users reach the bot. Each chat maps to one thread ("Telegram · <name>") and messages go
-through the same send path as `POST /bots/:id/messages`, with `tg-<botId>-<update_id>` as the send
+through the same send path as `POST /bots/:id/messages`, with `tg-<botId>-<account fingerprint>-<update_id>` as the send
 nonce. A refused sender is ignored, and the last one is shown in the card so the user can allow
 them in one click. `/new` opens another thread, `/stop` cancels the active run, `/status` reports
 the thread and whether it is busy.
@@ -423,7 +424,10 @@ an allowed user answers through `runtime.answerApproval` and resolves the notifi
 taps get "Pedido expirado". An answer given in the app edits the Telegram message. When "Enviar
 resultados das rotinas" is on, each finished routine run of the bot is sent to the home chat. A
 revoked token stops polling with an error status. Deleting the bot removes its configuration and
-token.
+token. Replacing the token clears the old account's polling offset and chat links. A saved receipt
+prevents recent routine results from being forwarded again after reconnecting. Replies stop when a
+user is removed from the allowlist. Approval buttons are bound to a unique request and its private
+Telegram message, so reconnecting never reuses an old button for a different request.
 
 ## 4. Projects, processes, secrets, preview (WP5; Preview pane UI in WP9, webview in WP1)
 

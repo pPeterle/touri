@@ -1,7 +1,7 @@
 import type { ApiRoutes, TelegramIntegration } from "@touri/contracts"
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import type { UiApi } from "../api/client"
-import { t } from "../i18n"
+import { localizeNotice, t } from "../i18n"
 import { ScreenState } from "./ScreenPrimitives"
 
 type Patch = ApiRoutes["PUT /bots/:id/integrations/telegram"]["req"]
@@ -17,7 +17,8 @@ const statusText = (telegram: TelegramIntegration): string => {
   if (status.state === "connected")
     return status.username ? t("Conectado como @{username}", { username: status.username }) : t("Conectado")
   if (status.state === "connecting") return t("Conectando…")
-  if (status.state === "error") return status.error ?? t("Não foi possível carregar o Telegram deste bot.")
+  if (status.state === "error")
+    return status.error ? localizeNotice(status.error) : t("Não foi possível carregar o Telegram deste bot.")
   return t("Desligado")
 }
 
@@ -31,7 +32,12 @@ const statusClass = (telegram: TelegramIntegration): string =>
         : ""
 
 /** Per-bot Telegram bridge: off until the user saves a token, enables it and allows someone. */
-export const TelegramIntegrationCard = ({ api, botId }: { api: UiApi; botId: string }) => {
+export const TelegramIntegrationCard = ({ api, botId }: { api: UiApi; botId: string }) => (
+  <TelegramCard key={botId} api={api} botId={botId} />
+)
+
+const TelegramCard = ({ api, botId }: { api: UiApi; botId: string }) => {
+  const requestVersion = useRef(0)
   const [telegram, setTelegram] = useState<TelegramIntegration | null>(null)
   const [failed, setFailed] = useState(false)
   const [saveError, setSaveError] = useState(false)
@@ -49,30 +55,41 @@ export const TelegramIntegrationCard = ({ api, botId }: { api: UiApi; botId: str
   }, [])
 
   const load = useCallback(() => {
+    const version = ++requestVersion.current
     setFailed(false)
     return api
       .request("GET /bots/:id/integrations/telegram", {}, { id: botId })
-      .then((response) => apply(response.telegram))
-      .catch(() => setFailed(true))
+      .then((response) => {
+        if (version === requestVersion.current) apply(response.telegram)
+      })
+      .catch(() => {
+        if (version === requestVersion.current) setFailed(true)
+      })
   }, [api, apply, botId])
 
   useEffect(() => {
     setTelegram(null)
     void load()
+    return () => {
+      requestVersion.current += 1
+    }
   }, [load])
 
   const save = async (patch: Patch): Promise<void> => {
     if (busy) return
+    const version = ++requestVersion.current
     setBusy(true)
     setSaveError(false)
     try {
       const response = await api.request("PUT /bots/:id/integrations/telegram", patch, { id: botId })
-      apply(response.telegram)
-      if (patch.token) setToken("")
+      if (version === requestVersion.current) {
+        apply(response.telegram)
+        if (patch.token) setToken("")
+      }
     } catch {
-      setSaveError(true)
+      if (version === requestVersion.current) setSaveError(true)
     } finally {
-      setBusy(false)
+      if (version === requestVersion.current) setBusy(false)
     }
   }
 
@@ -183,7 +200,7 @@ export const TelegramIntegrationCard = ({ api, botId }: { api: UiApi; botId: str
             "Crie um bot com o @BotFather e cole o token. Quando alguém mandar a primeira mensagem, o ID aparece aqui para você permitir.",
           )}
         </span>
-        <button type="button" className="outline-button" onClick={() => void load()}>
+        <button type="button" className="outline-button" disabled={busy} onClick={() => void load()}>
           {t("Atualizar status")}
         </button>
       </div>

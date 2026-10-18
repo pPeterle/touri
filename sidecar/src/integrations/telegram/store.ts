@@ -11,6 +11,7 @@ export type TelegramState = {
   /** Telegram chat ID to touri thread ID. */
   chats: Record<string, Id>
   lastRejected: TelegramIntegration["lastRejected"]
+  routineRunIds: Array<Id>
 }
 
 export const DEFAULT_CONFIG: TelegramIntegrationConfig = {
@@ -19,7 +20,7 @@ export const DEFAULT_CONFIG: TelegramIntegrationConfig = {
   homeChatId: null,
   forwardRoutines: false,
 }
-const DEFAULT_STATE: TelegramState = { offset: 0, chats: {}, lastRejected: null }
+const DEFAULT_STATE: TelegramState = { offset: 0, chats: {}, lastRejected: null, routineRunIds: [] }
 
 const configKey = (botId: Id) => `telegram:${botId}`
 const stateKey = (botId: Id) => `telegram-state:${botId}`
@@ -69,6 +70,9 @@ export const createTelegramStore = (kernel: Kernel) => {
     const chats = record(value.chats)
     const rejected = record(value.lastRejected)
     return {
+      routineRunIds: Array.isArray(value.routineRunIds)
+        ? value.routineRunIds.filter((id): id is string => typeof id === "string").slice(-200)
+        : [],
       offset: Number.isSafeInteger(value.offset) ? (value.offset as number) : DEFAULT_STATE.offset,
       chats: Object.fromEntries(
         Object.entries(chats).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
@@ -89,6 +93,7 @@ export const createTelegramStore = (kernel: Kernel) => {
     state,
     saveState: (botId: Id, value: TelegramState) => write(stateKey(botId), value),
     configuredBots,
+    resetState: (botId: Id) => db.query("DELETE FROM settings WHERE key = ?").run(stateKey(botId)),
     remove: (botId: Id) => {
       db.query("DELETE FROM settings WHERE key IN (?, ?)").run(configKey(botId), stateKey(botId))
     },

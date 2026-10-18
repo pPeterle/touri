@@ -64,4 +64,48 @@ describe("Telegram integration card", () => {
     )
     await waitFor(() => expect(screen.queryByText("Pedido de Ana (ID 77)")).toBeNull())
   })
+
+  it("clears the entered token and settings when the selected bot changes", async () => {
+    const api = createMockApi()
+    const { rerender } = render(<TelegramIntegrationCard api={api} botId="bot-a" />)
+    await screen.findByLabelText("Token do bot")
+    fireEvent.change(screen.getByLabelText("Token do bot"), { target: { value: TOKEN } })
+    fireEvent.change(screen.getByLabelText("IDs de usuário permitidos"), { target: { value: "42" } })
+    rerender(<TelegramIntegrationCard api={api} botId="bot-b" />)
+    await screen.findByLabelText("Token do bot")
+    expect(screen.getByLabelText("Token do bot")).toHaveValue("")
+    expect(screen.getByLabelText("IDs de usuário permitidos")).toHaveValue("")
+    expect(screen.getByRole("button", { name: "Salvar token" })).toBeDisabled()
+  })
+
+  it("ignores a late settings response from the previously selected bot", async () => {
+    let release = (_response: unknown) => {}
+    const pending = new Promise((resolve) => {
+      release = resolve
+    })
+    const telegram: TelegramIntegration = {
+      config: { enabled: false, allowedUserIds: ["77"], homeChatId: null, forwardRoutines: false },
+      tokenSaved: false,
+      status: { state: "off", username: null, error: null },
+      lastRejected: null,
+    }
+    const request = vi.fn((_route: string, _input: unknown, path: { id: string }) =>
+      path.id === "bot-a" ? pending : Promise.resolve({ telegram }),
+    )
+    const api = { request, subscribe: () => () => undefined, isMock: true } as unknown as UiApi
+    const { rerender } = render(<TelegramIntegrationCard api={api} botId="bot-a" />)
+    rerender(<TelegramIntegrationCard api={api} botId="bot-b" />)
+    await screen.findByLabelText("IDs de usuário permitidos")
+    expect(screen.getByLabelText("IDs de usuário permitidos")).toHaveValue("77")
+    release({ telegram: { ...telegram, config: { ...telegram.config, allowedUserIds: ["42"] } } })
+    await waitFor(() => expect(screen.getByLabelText("IDs de usuário permitidos")).toHaveValue("77"))
+  })
+
+  it("provides Portuguese and English for connection status errors", () => {
+    expect(t("Salve o token do bot do Telegram.", {}, "en")).toBe("Save the Telegram bot token.")
+    expect(t("Token inválido ou revogado.", {}, "en")).toBe("Invalid or revoked token.")
+    expect(t("Não foi possível conectar ao Telegram. Confira sua conexão e tente novamente.", {}, "en")).toBe(
+      "Could not connect to Telegram. Check your connection and try again.",
+    )
+  })
 })

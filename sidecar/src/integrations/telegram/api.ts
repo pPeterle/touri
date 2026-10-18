@@ -21,29 +21,46 @@ export type InlineKeyboard = { inline_keyboard: Array<Array<{ text: string; call
 
 export const TELEGRAM_API_BASE = "https://api.telegram.org"
 
-export const createTelegramApi = ({ token, base = TELEGRAM_API_BASE }: { token: string; base?: string }) => {
+export const createTelegramApi = ({
+  token,
+  base = TELEGRAM_API_BASE,
+  signal: lifetime,
+  timeoutMs = 40_000,
+}: {
+  token: string
+  base?: string
+  signal?: AbortSignal
+  timeoutMs?: number
+}) => {
   const call = async <T>(method: string, params: Record<string, unknown>, signal?: AbortSignal): Promise<T> => {
-    let response: Response
+    const requestSignal = AbortSignal.any([
+      AbortSignal.timeout(timeoutMs),
+      ...(lifetime ? [lifetime] : []),
+      ...(signal ? [signal] : []),
+    ])
     try {
-      response = await fetch(`${base}/bot${token}/${method}`, {
+      const response = await fetch(`${base}/bot${token}/${method}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(params),
-        ...(signal ? { signal } : {}),
+        signal: requestSignal,
       })
+      const payload = (await response.json().catch(() => null)) as {
+        ok?: boolean
+        result?: T
+        description?: string
+      } | null
+      if (!response.ok || !payload?.ok)
+        throw new TelegramApiError(
+          response.status,
+          (payload?.description ?? `HTTP ${response.status}`).replaceAll(token, "[redacted]"),
+        )
+      return payload.result as T
     } catch (error) {
-      if (signal?.aborted) throw error
-      // The fetch error can echo the URL, which contains the token.
+      if (error instanceof TelegramApiError) throw error
+      // Fetch and response-body errors can echo the URL, which contains the token.
       throw new TelegramApiError(0, "network error")
     }
-    const payload = (await response.json().catch(() => null)) as {
-      ok?: boolean
-      result?: T
-      description?: string
-    } | null
-    if (!response.ok || !payload?.ok)
-      throw new TelegramApiError(response.status, payload?.description ?? `HTTP ${response.status}`)
-    return payload.result as T
   }
   return {
     getMe: (signal?: AbortSignal) => call<TelegramUser>("getMe", {}, signal),

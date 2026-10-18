@@ -3,6 +3,10 @@ import { userFacingError } from "./errors"
 /** All UI copy lives here. pt-BR is the default; English is available for a future locale picker. */
 export type Locale = "pt-BR" | "en"
 export const ptBR = {
+  "Salve o token do bot do Telegram.": "Salve o token do bot do Telegram.",
+  "Token inválido ou revogado.": "Token inválido ou revogado.",
+  "Não foi possível conectar ao Telegram. Confira sua conexão e tente novamente.":
+    "Não foi possível conectar ao Telegram. Confira sua conexão e tente novamente.",
   "O contexto da conversa foi recuperado do histórico salvo.":
     "O contexto da conversa foi recuperado do histórico salvo.",
   "Abrir resultado completo": "Abrir resultado completo",
@@ -35,7 +39,6 @@ export const ptBR = {
     "Para usar processos supervisionados e o Preview, vincule o projeto nas configurações do bot.",
   "Agendar esta tarefa": "Agendar esta tarefa",
   "Aprendizado contínuo": "Aprendizado contínuo",
-  Desligado: "Desligado",
   "O bot guarda fatos que valem em toda conversa e registra procedimentos que se repetem como skills. As revisões automáticas rodam como turnos extras e usam a conta do provedor do bot.":
     "O bot guarda fatos que valem em toda conversa e registra procedimentos que se repetem como skills. As revisões automáticas rodam como turnos extras e usam a conta do provedor do bot.",
   "Não foi possível carregar ou salvar o aprendizado. Tente novamente.":
@@ -2055,10 +2058,13 @@ export const ptBR = {
 } as const
 export type TranslationKey = keyof typeof ptBR
 const englishOverrides: Partial<Record<TranslationKey, string>> = {
+  "Salve o token do bot do Telegram.": "Save the Telegram bot token.",
+  "Token inválido ou revogado.": "Invalid or revoked token.",
+  "Não foi possível conectar ao Telegram. Confira sua conexão e tente novamente.":
+    "Could not connect to Telegram. Check your connection and try again.",
   "Converse com este bot pelo Telegram. Só as pessoas permitidas abaixo conseguem falar com ele.":
     "Talk to this bot on Telegram. Only the people allowed below can reach it.",
   "Ativar Telegram": "Enable Telegram",
-  Desligado: "Off",
   "Conectado como @{username}": "Connected as @{username}",
   Conectado: "Connected",
   "Token do bot": "Bot token",
