@@ -4,6 +4,7 @@ import { approvalDestination } from "../approvals/grants"
 import { hiddenInGroupSession } from "../groups/privacy"
 import { delegatedBot, getDelegation } from "../groups/security"
 import { redactStructured } from "../kernel/redact"
+import { mem0SessionAllowed } from "../mem0/session"
 import { capabilitySupport } from "../projects/capability-support"
 import { createProjectStore } from "../projects/repository"
 import { auditToolCall } from "./audit"
@@ -78,7 +79,11 @@ const visibleTo = ({
   )
     return false
   if (hiddenInGroupSession(kernel, caller.threadId, tool.name)) return false
-  if (tool.name.startsWith("mem0_") && !kernel.services.use("mem0.api")?.enabled(caller.botId)) return false
+  if (
+    tool.name.startsWith("mem0_") &&
+    (!kernel.services.use("mem0.api")?.enabled(caller.botId) || !mem0SessionAllowed(kernel, caller.threadId))
+  )
+    return false
   const meta = toolMetadata(tool)
   if (!experimental && !meta.mvp) return false
   if (meta.internal && caller.provider !== "claude") return false

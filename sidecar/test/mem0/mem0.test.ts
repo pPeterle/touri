@@ -2,7 +2,8 @@ import { afterEach, expect, test } from "bun:test"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import type { Bot, Kernel, Mem0Settings, ToolContext, ToolResult } from "@touri/contracts"
+import type { Bot, Kernel, Mem0Settings, Run, ToolContext, ToolResult } from "@touri/contracts"
+import { setDelegation } from "../../src/groups/security"
 import { createKernel } from "../../src/kernel"
 import { createToolRouter } from "../../src/mcp/router"
 import { createBreaker, createMem0Client, Mem0Error } from "../../src/mem0/client"
@@ -633,5 +634,76 @@ test("memory writes honor read-only policy and explicit approval through the rou
   await f.api(`/bots/${f.bot.id}`, { access: "workspace-write", approvals: "on-request" }, "PATCH")
   expect(await write()).toMatchObject({ success: false, errorCode: "DENIED" })
   expect(approvals).toBe(1)
+  expect(f.fake.seen).toEqual([])
+})
+
+test("routine and delegated sessions cannot list, invoke or advertise personal memory tools", async () => {
+  const f = await fixture()
+  await f.configure({ enabled: true, apiKey: "m0-private-session" })
+  const router = createToolRouter({
+    kernel: f.kernel,
+    registrations: new Map(f.mem0.tools.map((tool) => [tool.name, tool])),
+  })
+  const check = async (threadId: string) => {
+    const thread = f.store.getThread({ threadId })
+    if (!thread) throw new Error("thread missing")
+    const caller = {
+      botId: f.bot.id,
+      threadId,
+      projectId: null,
+      cwd: f.bot.homeDir,
+      provider: "codex" as const,
+      browserEnabled: false,
+      computerUse: false,
+    }
+    expect(router.list({ caller }).filter((tool) => tool.name.startsWith("mem0_"))).toEqual([])
+    for (const [name, args] of [
+      ["mem0_search", { query: "minha cidade" }],
+      ["mem0_add", { content: "Moro no sul." }],
+      ["mem0_update", { memory_id: "mine", text: "Moro no sul." }],
+      ["mem0_delete", { memory_id: "mine" }],
+    ] as const) {
+      expect(await f.tool(name)(args, f.ctx(threadId))).toMatchObject({ success: false, errorCode: "DENIED" })
+      expect(await router.call({ id: 1, name, args, caller, signal: new AbortController().signal })).toMatchObject({
+        success: false,
+        errorCode: "TOOL_NOT_FOUND",
+      })
+    }
+    expect(
+      await composeDeveloperInstructions({ kernel: f.kernel, bot: f.bot, thread, cwd: f.bot.homeDir }),
+    ).not.toContain("Mem0 memory is on")
+  }
+  const routine = f.store.createThread({ botId: f.bot.id, kind: "routine", title: "Rotina de teste" })
+  if (!routine.success) throw new Error(routine.error)
+  await check(routine.thread.id)
+  // A routine may use the existing main conversation as its result destination.
+  const run: Run = {
+    id: "routine-run",
+    threadId: f.bot.mainThreadId ?? "",
+    botId: f.bot.id,
+    provider: "codex",
+    trigger: "routine",
+    requestMessageId: null,
+    replyMessageId: null,
+    externalTurnId: null,
+    status: "running",
+    errorClass: null,
+    errorMessage: null,
+    usage: null,
+    routineRunId: null,
+    queuedAt: 1,
+    startedAt: 1,
+    finishedAt: null,
+  }
+  f.kernel.services.provide("runtime.activeRun", () => run)
+  await check(run.threadId)
+  f.kernel.services.provide("runtime.activeRun", () => null)
+  setDelegation(f.kernel, run.threadId, {
+    ceiling: f.bot,
+    caller: { id: "peer", name: "Bot de teste" },
+    groupThreadId: "delegation-origin",
+    secrets: false,
+  })
+  await check(run.threadId)
   expect(f.fake.seen).toEqual([])
 })

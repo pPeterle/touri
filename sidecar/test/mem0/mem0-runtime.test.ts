@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Bot, Kernel, Message, Run } from "@touri/contracts"
+import { setDelegation } from "../../src/groups/security"
 import { createKernel } from "../../src/kernel"
 import { createMem0 } from "../../src/mem0/index"
 import { createRuntimeEngine } from "../../src/runtime/engine"
@@ -197,5 +198,22 @@ test("canceling a turn also cancels recall before the provider starts", async ()
   expect(signal?.aborted).toBe(true)
   await until(() => f.finished(run))
   expect(f.turnInputs()).toEqual([])
+  expect(f.seen).toEqual([])
+})
+
+test("delegation cannot recall or sync personal memory even without group metadata", async () => {
+  const f = await fixture()
+  await f.api(`/bots/${f.bot.id}/mem0`, { enabled: true, apiKey: "m0-delegated-runtime" }, "PUT")
+  setDelegation(f.runtime.kernel, f.bot.mainThreadId ?? "", {
+    ceiling: f.bot,
+    caller: { id: "peer", name: "Bot de teste" },
+    groupThreadId: "delegation-origin",
+    secrets: false,
+  })
+  const { run } = f.send("Qual a minha cidade?")
+  await until(() => f.finished(run))
+  expect(run.status).toBe("succeeded")
+  expect(f.turnInputs()[0]).not.toContain("<mem0-recall>")
+  await Bun.sleep(30)
   expect(f.seen).toEqual([])
 })

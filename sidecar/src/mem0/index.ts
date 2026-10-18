@@ -12,6 +12,7 @@ import type {
 import { createBreaker, createMem0Client, type Mem0Client, Mem0Error, type Mem0Scope, PLATFORM_URL } from "./client"
 import { type Mem0Config, ownerId, patchError, readConfig, secretAccount, writeConfig } from "./config"
 import { recallBlock, stripRecall, trivialQuery, truncateAtSentence } from "./context"
+import { mem0SessionAllowed } from "./session"
 
 export const name = "mem0"
 
@@ -219,8 +220,10 @@ export const createMem0 = (
   const toolContext = async (botId: Id, threadId: Id, callerSignal: AbortSignal) => {
     const config = readConfig(kernel, botId)
     if (!config.enabled) return { error: fail("MEM0_DISABLED", "Mem0 está desligado para este bot.") }
-    if (store()?.getThread({ threadId })?.groupId)
-      return { error: fail("DENIED", "Mem0 não está disponível em conversas de grupo.") }
+    if (!mem0SessionAllowed(kernel, threadId))
+      return {
+        error: fail("DENIED", "Mem0 só está disponível em conversas diretas, fora de grupos, rotinas e delegações."),
+      }
     let client: Mem0Client | null
     try {
       client = await clientFor(botId, config, AbortSignal.any([botSignal(botId), callerSignal]))

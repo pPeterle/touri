@@ -36,6 +36,7 @@ import { providerProfileEnv } from "../kernel/provider-profiles"
 import { redactStructured } from "../kernel/redact"
 import { attachedServers, resolveAttachedMcp } from "../mcp/attached"
 import { reapOrphanShims } from "../mcp/shim-registry"
+import { mem0SessionAllowed } from "../mem0/session"
 import { resolveMcpEndpoint } from "../platform/transport"
 import { prepareLocalProviderLogin } from "../vm/local-provider-login"
 import { ProviderLoginError } from "../vm/provider-login"
@@ -928,7 +929,7 @@ export const createRuntimeEngine = ({
       request.role === "user" &&
       !resumedFrom &&
       run.trigger === "user" &&
-      !thread.groupId &&
+      mem0SessionAllowed(kernel, thread.id) &&
       bot.machine !== "cloud" &&
       mem0.enabled(bot.id)
     let recalled: string | null = null

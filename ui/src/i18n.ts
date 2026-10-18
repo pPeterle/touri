@@ -297,6 +297,8 @@ export const ptBR = {
   "Destino dos resultados": "Destino dos resultados",
   "Nesta conversa": "Nesta conversa",
   "Memória Mem0": "Memória Mem0",
+  "Mem0 só está disponível em conversas diretas, fora de grupos, rotinas e delegações.":
+    "Mem0 só está disponível em conversas diretas, fora de grupos, rotinas e delegações.",
   "Lembra fatos sobre você entre conversas. Antes de cada mensagem, o bot busca no Mem0 o que já sabe; depois, envia a troca para o Mem0 extrair fatos novos.":
     "Lembra fatos sobre você entre conversas. Antes de cada mensagem, o bot busca no Mem0 o que já sabe; depois, envia a troca para o Mem0 extrair fatos novos.",
   "Ativar Mem0 para este bot": "Ativar Mem0 para este bot",
@@ -2377,6 +2379,8 @@ const englishOverrides: Partial<Record<TranslationKey, string>> = {
   "Destino dos resultados": "Results destination",
   "Nesta conversa": "This conversation",
   "Memória Mem0": "Mem0 memory",
+  "Mem0 só está disponível em conversas diretas, fora de grupos, rotinas e delegações.":
+    "Mem0 is only available in direct conversations, outside groups, routines and delegated requests.",
   "Lembra fatos sobre você entre conversas. Antes de cada mensagem, o bot busca no Mem0 o que já sabe; depois, envia a troca para o Mem0 extrair fatos novos.":
     "Remembers facts about you across conversations. Before each message the bot looks up what it already knows in Mem0; afterwards it sends the exchange to Mem0 to extract new facts.",
   "Ativar Mem0 para este bot": "Turn on Mem0 for this bot",
