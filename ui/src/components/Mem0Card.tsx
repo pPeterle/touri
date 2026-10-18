@@ -8,6 +8,10 @@ type Status = { kind: "idle" } | { kind: "busy" } | { kind: "ok"; text: string }
 
 /** Optional Mem0 memory for one bot. The key is write-only: the card only learns whether one is saved. */
 export const Mem0Card = ({ api, botId }: { api: UiApi; botId: string }) => {
+  return <Mem0CardForm key={botId} api={api} botId={botId} />
+}
+
+const Mem0CardForm = ({ api, botId }: { api: UiApi; botId: string }) => {
   const [saved, setSaved] = useState<Mem0Settings | null>(null)
   const [draft, setDraft] = useState<Mem0Settings | null>(null)
   const [apiKey, setApiKey] = useState("")
@@ -71,6 +75,7 @@ export const Mem0Card = ({ api, botId }: { api: UiApi; botId: string }) => {
     )
   if (!draft || !saved) return null
   const busy = status.kind === "busy"
+  const dirty = apiKey !== "" || JSON.stringify(draft) !== JSON.stringify(saved)
   const update = (patch: Partial<Mem0Settings>) => {
     setDraft({ ...draft, ...patch })
     setStatus({ kind: "idle" })
@@ -199,8 +204,9 @@ export const Mem0Card = ({ api, botId }: { api: UiApi; botId: string }) => {
                 )}{" "}
             {t("O Mem0 não é usado em grupos, rotinas nem pedidos delegados.")}
           </p>
+          {dirty && <p className="field-help">{t("Salve as alterações antes de testar a conexão.")}</p>}
           <div className="screen-card-footer">
-            <button type="button" className="outline-button" onClick={() => void test()}>
+            <button type="button" className="outline-button" disabled={dirty} onClick={() => void test()}>
               {t("Testar conexão")}
             </button>
             <button type="submit" className="brand-button">

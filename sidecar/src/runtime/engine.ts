@@ -931,7 +931,16 @@ export const createRuntimeEngine = ({
       !thread.groupId &&
       bot.machine !== "cloud" &&
       mem0.enabled(bot.id)
-    const recalled = remembers && request ? await mem0?.recall({ botId: bot.id, query: request.text }) : null
+    let recalled: string | null = null
+    if (remembers && request) {
+      const recallController = new AbortController()
+      controllers.set(run.id, recallController)
+      try {
+        recalled = await mem0.recall({ botId: bot.id, query: request.text, signal: recallController.signal })
+      } finally {
+        controllers.delete(run.id)
+      }
+    }
     const inputText = [recalled, carryover, toolSummary, requestText].filter(Boolean).join("\n\n")
     const requestParts = unacceptedRequest
       ? [...unacceptedRequest.parts, ...(request?.parts ?? [])]
@@ -1723,6 +1732,7 @@ export const createRuntimeEngine = ({
     if (!run) return { success: false, errorCode: "NOT_FOUND", error: "Run not found" }
     if (!["queued", "starting", "running"].includes(run.status)) return { success: true, run }
     if (run.status === "queued") {
+      controllers.get(id)?.abort()
       const store = kernel.services.use("store.api")
       const thread = store?.getThread({ threadId: run.threadId })
       if (store && thread) {

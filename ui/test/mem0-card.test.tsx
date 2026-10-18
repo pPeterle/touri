@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { createMockApi } from "../src/api/mock"
 import { Mem0Card } from "../src/components/Mem0Card"
 import { t } from "../src/i18n"
@@ -46,5 +46,57 @@ describe("Mem0 card", () => {
     fireEvent.click(screen.getByRole("button", { name: "Testar conexão" }))
     expect(await screen.findByText("Conexão funcionando.")).toBeVisible()
     expect(t("Memória Mem0", {}, "en")).toBe("Mem0 memory")
+  })
+
+  it("requires saving edited connection settings before testing", async () => {
+    const api = createMockApi()
+    render(<Mem0Card api={api} botId="bot-mark" />)
+    const test = await screen.findByRole("button", { name: "Testar conexão" })
+    expect(test).toBeEnabled()
+    fireEvent.change(screen.getByLabelText("Chave da API"), { target: { value: "new-key" } })
+    expect(test).toBeDisabled()
+    expect(screen.getByText("Salve as alterações antes de testar a conexão.")).toBeVisible()
+    fireEvent.click(screen.getByRole("button", { name: "Salvar Mem0" }))
+    await screen.findByText("Salvo.")
+    expect(test).toBeEnabled()
+    fireEvent.change(screen.getByLabelText("Onde ficam as memórias"), { target: { value: "server" } })
+    expect(test).toBeDisabled()
+  })
+
+  it("ignores a save response from the previously selected bot", async () => {
+    const api = createMockApi()
+    const request = api.request.bind(api)
+    let release = () => {}
+    const pending = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    vi.spyOn(api, "request").mockImplementation(async (route, input, path) => {
+      if (route === "PUT /bots/:id/mem0") await pending
+      return request(route, input, path)
+    })
+    const view = render(<Mem0Card api={api} botId="bot-mark" />)
+    fireEvent.click(await screen.findByRole("switch", { name: "Ativar Mem0 para este bot" }))
+    fireEvent.click(screen.getByRole("button", { name: "Salvar Mem0" }))
+    view.rerender(<Mem0Card api={api} botId="bot-other" />)
+    await waitFor(() =>
+      expect(api.calls.some((call) => call.route === "GET /bots/:id/mem0" && call.pathValues?.id === "bot-other")).toBe(
+        true,
+      ),
+    )
+    await waitFor(() => expect(screen.getByRole("switch", { name: "Ativar Mem0 para este bot" })).not.toBeChecked())
+    release()
+    await waitFor(() => expect(saves(api)).toHaveLength(1))
+    expect(screen.getByRole("switch", { name: "Ativar Mem0 para este bot" })).not.toBeChecked()
+    expect(screen.getByText("Desligado")).toBeVisible()
+  })
+
+  it("translates connection errors in English", () => {
+    expect(t("O Mem0 recusou a chave. Confira a chave e tente de novo.", {}, "en")).toBe(
+      "Mem0 rejected the key. Check the key and try again.",
+    )
+    expect(t("O Mem0 não respondeu a tempo. Tente de novo.", {}, "en")).toBe("Mem0 did not respond in time. Try again.")
+    expect(t("O servidor retornou uma resposta inválida. Confira a URL do Mem0.", {}, "en")).toBe(
+      "The server returned an invalid response. Check the Mem0 URL.",
+    )
   })
 })

@@ -41,6 +41,19 @@ export const createMem0 = (
   const breaker = createBreaker(options.now ? { now: options.now } : {})
   const keys = new Map<Id, string | null>()
   const syncing = new Set<Id>()
+  const controllers = new Map<Id, AbortController>()
+  const botSignal = (botId: Id): AbortSignal => {
+    let controller = controllers.get(botId)
+    if (!controller) {
+      controller = new AbortController()
+      controllers.set(botId, controller)
+    }
+    return controller.signal
+  }
+  const invalidate = (botId: Id): void => {
+    controllers.get(botId)?.abort()
+    controllers.delete(botId)
+  }
 
   const keySaved = (botId: Id): boolean => {
     const row = db.query("SELECT value_json FROM settings WHERE key=?").get(KEY_FLAG(botId)) as {
@@ -58,14 +71,16 @@ export const createMem0 = (
       )
     else db.query("DELETE FROM settings WHERE key=?").run(KEY_FLAG(botId))
   }
-  const loadKey = async (botId: Id): Promise<string | null> => {
+  const loadKey = async (botId: Id, signal: AbortSignal): Promise<string | null> => {
+    signal.throwIfAborted()
     if (keys.has(botId)) return keys.get(botId) ?? null
     if (!keySaved(botId)) return null
     const saved = await kernel.callHost("keychain.get", { account: secretAccount(botId) })
-    const value = saved.success ? saved.value.value : null
+    signal.throwIfAborted()
+    if (!saved.success) throw new Mem0Error("Mem0 keychain is unavailable", null)
+    const value = saved.value.value
     if (value) kernel.addRedactionValue(value)
-    // A failed read is not cached, so an unlocked keychain works on the next turn.
-    if (saved.success) keys.set(botId, value)
+    keys.set(botId, value)
     return value
   }
 
@@ -76,14 +91,16 @@ export const createMem0 = (
   const botExists = (botId: Id): boolean => !!store()?.getBot({ botId })
   const enabled = (botId: Id): boolean => botExists(botId) && readConfig(kernel, botId).enabled
 
-  const clientFor = async (botId: Id, config: Mem0Config): Promise<Mem0Client | null> => {
-    const apiKey = (await loadKey(botId)) ?? ""
+  const clientFor = async (botId: Id, config: Mem0Config, signal = botSignal(botId)): Promise<Mem0Client | null> => {
+    const apiKey = (await loadKey(botId, signal)) ?? ""
+    signal.throwIfAborted()
     if (config.mode === "platform" && !apiKey) return null
     if (config.mode === "server" && !config.url) return null
     return createMem0Client({
       mode: config.mode,
       url: config.url,
       apiKey,
+      signal,
       platformUrl: options.platformUrl ?? PLATFORM_URL,
       ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
     })
@@ -117,36 +134,45 @@ export const createMem0 = (
   /** The turn waits at most this long for recall, keychain read included. */
   const RECALL_BUDGET_MS = 3_500
   const recall = async (args: { botId: Id; query: string; signal?: AbortSignal }): Promise<string | null> => {
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const late = new Promise<null>((resolve) => {
-      timer = setTimeout(() => resolve(null), RECALL_BUDGET_MS)
-    })
+    const budget = new AbortController()
+    const timer = setTimeout(() => budget.abort(), RECALL_BUDGET_MS)
+    const signal = AbortSignal.any([budget.signal, botSignal(args.botId), ...(args.signal ? [args.signal] : [])])
+    let canceled = () => {}
     try {
-      return await Promise.race([lookup(args), late])
+      if (signal.aborted) return null
+      const late = new Promise<null>((resolve) => {
+        canceled = () => resolve(null)
+        signal.addEventListener("abort", canceled, { once: true })
+      })
+      return await Promise.race([lookup({ ...args, signal }), late])
+    } catch (error) {
+      warn("Mem0 recall skipped", args.botId, error)
+      return null
     } finally {
       clearTimeout(timer)
+      signal.removeEventListener("abort", canceled)
     }
   }
-  const lookup = async ({ botId, query }: { botId: Id; query: string; signal?: AbortSignal }) => {
+  const lookup = async ({ botId, query, signal }: { botId: Id; query: string; signal: AbortSignal }) => {
     const config = readConfig(kernel, botId)
     if (!config.enabled || !botExists(botId)) return null
-    const text = stripRecall(query)
+    const text = kernel.redact(stripRecall(query))
     if (trivialQuery(text)) return null
-    const client = await clientFor(botId, config)
-    if (!client) return null
-    const result = await guarded(botId, () =>
-      client.search({
-        query: text.slice(0, 2_000),
+    const result = await guarded(botId, async () => {
+      const client = await clientFor(botId, config, signal)
+      if (!client) return []
+      return client.search({
+        query: kernel.redact(text).slice(0, 2_000),
         scope: searchScope(botId, config),
         topK: config.topK,
         threshold: config.threshold,
-      }),
-    )
+      })
+    })
     if ("error" in result) {
       warn("Mem0 recall skipped", botId, result.error)
       return null
     }
-    return recallBlock(result.value)
+    return signal.aborted ? null : recallBlock(result.value)
   }
 
   const sync = ({
@@ -166,21 +192,22 @@ export const createMem0 = (
     const assistant = truncateAtSentence(stripRecall(assistantText), SYNC_MAX_CHARS)
     if (!user || !assistant || trivialQuery(user)) return
     syncing.add(botId)
+    const signal = botSignal(botId)
     void (async () => {
       try {
-        const client = await clientFor(botId, config)
-        if (!client) return
-        const result = await guarded(botId, () =>
-          client.add({
+        const result = await guarded(botId, async () => {
+          const client = await clientFor(botId, config, signal)
+          if (!client) return
+          return client.add({
             messages: [
-              { role: "user", content: user },
-              { role: "assistant", content: assistant },
+              { role: "user", content: kernel.redact(user) },
+              { role: "assistant", content: kernel.redact(assistant) },
             ],
             scope: writeScope(botId),
             infer: true,
             metadata: { botId, threadId, source: "touri" },
-          }),
-        )
+          })
+        })
         if ("error" in result) warn("Mem0 sync failed", botId, result.error)
       } finally {
         syncing.delete(botId)
@@ -189,12 +216,17 @@ export const createMem0 = (
   }
 
   /** Tools act only on the calling bot's own memories, never in group sessions. */
-  const toolContext = async (botId: Id, threadId: Id) => {
+  const toolContext = async (botId: Id, threadId: Id, callerSignal: AbortSignal) => {
     const config = readConfig(kernel, botId)
     if (!config.enabled) return { error: fail("MEM0_DISABLED", "Mem0 está desligado para este bot.") }
     if (store()?.getThread({ threadId })?.groupId)
       return { error: fail("DENIED", "Mem0 não está disponível em conversas de grupo.") }
-    const client = await clientFor(botId, config)
+    let client: Mem0Client | null
+    try {
+      client = await clientFor(botId, config, AbortSignal.any([botSignal(botId), callerSignal]))
+    } catch (error) {
+      return { error: toolError(error) }
+    }
     if (!client)
       return {
         error: fail(
@@ -223,11 +255,11 @@ export const createMem0 = (
     const topK = typeof input.top_k === "number" && Number.isInteger(input.top_k) ? input.top_k : 8
     if (!query || query.length > 2_000 || topK < 1 || topK > 20)
       return fail("INVALID_ARGS", "Informe query (até 2000 caracteres) e top_k entre 1 e 20.")
-    const context = await toolContext(ctx.botId, ctx.threadId)
+    const context = await toolContext(ctx.botId, ctx.threadId, ctx.signal)
     if ("error" in context) return context.error
     const result = await guarded(ctx.botId, () =>
       context.client.search({
-        query,
+        query: kernel.redact(query),
         scope: searchScope(ctx.botId, context.config),
         topK,
         threshold: context.config.threshold,
@@ -240,11 +272,11 @@ export const createMem0 = (
   const add: ToolHandler = async ({ ctx, args }) => {
     const content = typeof record(args).content === "string" ? (record(args).content as string).trim() : ""
     if (!content || content.length > 2_000) return fail("INVALID_ARGS", "Informe content com até 2000 caracteres.")
-    const context = await toolContext(ctx.botId, ctx.threadId)
+    const context = await toolContext(ctx.botId, ctx.threadId, ctx.signal)
     if ("error" in context) return context.error
     const result = await guarded(ctx.botId, () =>
       context.client.add({
-        messages: [{ role: "user", content: stripRecall(content) }],
+        messages: [{ role: "user", content: kernel.redact(stripRecall(content)) }],
         scope: writeScope(ctx.botId),
         infer: false,
         metadata: { botId: ctx.botId, threadId: ctx.threadId, source: "touri-tool" },
@@ -262,18 +294,18 @@ export const createMem0 = (
     const id = typeof input.memory_id === "string" ? input.memory_id : ""
     const text = typeof input.text === "string" ? input.text.trim() : ""
     if (!id || !text || text.length > 2_000) return fail("INVALID_ARGS", "Informe memory_id e text (até 2000).")
-    const context = await toolContext(ctx.botId, ctx.threadId)
+    const context = await toolContext(ctx.botId, ctx.threadId, ctx.signal)
     if ("error" in context) return context.error
     const result = await guarded(ctx.botId, async () => {
       await owned(ctx.botId, context.config, context.client, id)
-      await context.client.update(id, stripRecall(text))
+      await context.client.update(id, kernel.redact(stripRecall(text)))
     })
     return "error" in result ? toolError(result.error) : ok("Memória atualizada no Mem0.")
   }
   const remove: ToolHandler = async ({ ctx, args }) => {
     const id = typeof record(args).memory_id === "string" ? (record(args).memory_id as string) : ""
     if (!id) return fail("INVALID_ARGS", "Informe memory_id.")
-    const context = await toolContext(ctx.botId, ctx.threadId)
+    const context = await toolContext(ctx.botId, ctx.threadId, ctx.signal)
     if ("error" in context) return context.error
     const result = await guarded(ctx.botId, async () => {
       await owned(ctx.botId, context.config, context.client, id)
@@ -293,20 +325,29 @@ export const createMem0 = (
     const patch = record(body) as Mem0SettingsPatch
     const invalid = patchError(patch)
     if (invalid) return json(400, { errorCode: "INVALID_ARGS", error: `${invalid.field}: ${invalid.error}` })
+    invalidate(botId)
     if (typeof patch.apiKey === "string") {
       const key = patch.apiKey.trim()
       kernel.addRedactionValue(key)
       const saved = await kernel.callHost("keychain.set", { account: secretAccount(botId), value: key })
       if (!saved.success)
         return json(503, { errorCode: "SECRET_UNAVAILABLE", error: "Não foi possível guardar a chave no cofre." })
+      if (!botExists(botId)) {
+        await kernel.callHost("keychain.delete", { account: secretAccount(botId) })
+        return json(404, { errorCode: "NOT_FOUND", error: "Bot não encontrado" })
+      }
       keys.set(botId, key)
       setKeyFlag(botId, true)
     } else if (patch.apiKey === null) {
-      await kernel.callHost("keychain.delete", { account: secretAccount(botId) })
+      const removed = await kernel.callHost("keychain.delete", { account: secretAccount(botId) })
+      if (!removed.success)
+        return json(503, { errorCode: "SECRET_UNAVAILABLE", error: "Não foi possível remover a chave do cofre." })
       keys.delete(botId)
       setKeyFlag(botId, false)
     }
+    if (!botExists(botId)) return json(404, { errorCode: "NOT_FOUND", error: "Bot não encontrado" })
     const config = writeConfig(kernel, botId, patch)
+    invalidate(botId)
     breaker.reset(botId)
     return json(200, { settings: settings(botId, config) })
   }
@@ -314,13 +355,13 @@ export const createMem0 = (
   const test = async (botId: Id): Promise<RouteResponse> => {
     if (!botExists(botId)) return json(404, { errorCode: "NOT_FOUND", error: "Bot não encontrado" })
     const config = readConfig(kernel, botId)
-    const client = await clientFor(botId, config)
-    if (!client)
-      return json(200, {
-        ok: false,
-        error: config.mode === "server" ? "Informe a URL do servidor." : "Salve a chave da API primeiro.",
-      })
     try {
+      const client = await clientFor(botId, config)
+      if (!client)
+        return json(200, {
+          ok: false,
+          error: config.mode === "server" ? "Informe a URL do servidor." : "Salve a chave da API primeiro.",
+        })
       await client.search({ query: "touri connection test", scope: searchScope(botId, config), topK: 1, threshold: 1 })
       breaker.reset(botId)
       return json(200, { ok: true })
@@ -330,13 +371,18 @@ export const createMem0 = (
         ok: false,
         error:
           status === 401 || status === 403
-            ? "O Mem0 recusou a chave."
-            : kernel.redact(error instanceof Error ? error.message : String(error)),
+            ? "O Mem0 recusou a chave. Confira a chave e tente de novo."
+            : error instanceof Mem0Error && error.reason === "timeout"
+              ? "O Mem0 não respondeu a tempo. Tente de novo."
+              : error instanceof Mem0Error && error.reason === "invalid_response"
+                ? "O servidor retornou uma resposta inválida. Confira a URL do Mem0."
+                : "Não foi possível conectar ao Mem0. Confira a conexão e a URL e tente de novo.",
       })
     }
   }
 
   const forget = async (botId: Id): Promise<void> => {
+    invalidate(botId)
     db.query("DELETE FROM settings WHERE key IN (?, ?)").run(`mem0:${botId}`, KEY_FLAG(botId))
     keys.delete(botId)
     breaker.reset(botId)
@@ -380,10 +426,7 @@ export const createMem0 = (
 }
 
 export const init = async (kernel: Kernel): Promise<void> => {
-  const mem0 = createMem0(kernel, {
-    // Test hook only: lets the suite point platform mode at a local fake.
-    ...(process.env.TOURI_MEM0_PLATFORM_URL ? { platformUrl: process.env.TOURI_MEM0_PLATFORM_URL } : {}),
-  })
+  const mem0 = createMem0(kernel)
   kernel.services.provide("mem0.api", mem0.api)
   kernel.registerRoutes(mem0.routes)
   const registration = kernel.registerTools({ tools: mem0.tools })

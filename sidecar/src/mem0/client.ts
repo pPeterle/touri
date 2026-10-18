@@ -19,6 +19,7 @@ export class Mem0Error extends Error {
   constructor(
     message: string,
     readonly status: number | null,
+    readonly reason: "unavailable" | "timeout" | "invalid_response" = "unavailable",
   ) {
     super(message)
   }
@@ -62,7 +63,8 @@ const results = (body: unknown): Mem0Memory[] => {
     ? body
     : body && typeof body === "object" && Array.isArray((body as { results?: unknown }).results)
       ? (body as { results: unknown[] }).results
-      : []
+      : null
+  if (!list) throw new Mem0Error("Mem0 returned an invalid search response", null, "invalid_response")
   return list.flatMap((row) => {
     const memory = toMemory(row)
     return memory ? [memory] : []
@@ -90,6 +92,7 @@ export const createMem0Client = ({
   apiKey,
   platformUrl = PLATFORM_URL,
   fetchImpl = fetch,
+  signal,
 }: {
   mode: Mem0Mode
   /** The self-hosted server; platform mode ignores it so the key only ever goes to Mem0 Cloud. */
@@ -97,6 +100,7 @@ export const createMem0Client = ({
   apiKey: string
   platformUrl?: string
   fetchImpl?: typeof fetch
+  signal?: AbortSignal
 }): Mem0Client => {
   const base = (mode === "platform" ? platformUrl : url).replace(/\/+$/, "")
   const headers: Record<string, string> = {
@@ -111,12 +115,16 @@ export const createMem0Client = ({
         method,
         headers,
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: AbortSignal.any([AbortSignal.timeout(timeoutMs), ...(signal ? [signal] : [])]),
         redirect: "error",
       })
     } catch (error) {
       const timedOut = error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")
-      throw new Mem0Error(timedOut ? "Mem0 did not answer in time" : "Mem0 is unreachable", null)
+      throw new Mem0Error(
+        timedOut ? "Mem0 did not answer in time" : "Mem0 is unreachable",
+        null,
+        timedOut ? "timeout" : "unavailable",
+      )
     }
     if (!response.ok) {
       // The body may echo request content; keep only the status.
@@ -124,7 +132,11 @@ export const createMem0Client = ({
       throw new Mem0Error(`Mem0 answered HTTP ${response.status}`, response.status)
     }
     if (response.status === 204) return null
-    return response.json().catch(() => null)
+    try {
+      return await response.json()
+    } catch {
+      throw new Mem0Error("Mem0 returned an invalid response", null, "invalid_response")
+    }
   }
   const item = (id: string) => {
     if (!validId(id)) throw new Mem0Error("Invalid memory id", 404)

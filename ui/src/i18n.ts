@@ -318,6 +318,16 @@ export const ptBR = {
   "Salvar Mem0": "Salvar Mem0",
   "Salvo.": "Salvo.",
   "Conexão funcionando.": "Conexão funcionando.",
+  "Salve as alterações antes de testar a conexão.": "Salve as alterações antes de testar a conexão.",
+  "Informe a URL do servidor.": "Informe a URL do servidor.",
+  "Salve a chave da API primeiro.": "Salve a chave da API primeiro.",
+  "O Mem0 recusou a chave. Confira a chave e tente de novo.":
+    "O Mem0 recusou a chave. Confira a chave e tente de novo.",
+  "O Mem0 não respondeu a tempo. Tente de novo.": "O Mem0 não respondeu a tempo. Tente de novo.",
+  "O servidor retornou uma resposta inválida. Confira a URL do Mem0.":
+    "O servidor retornou uma resposta inválida. Confira a URL do Mem0.",
+  "Não foi possível conectar ao Mem0. Confira a conexão e a URL e tente de novo.":
+    "Não foi possível conectar ao Mem0. Confira a conexão e a URL e tente de novo.",
   "Não foi possível carregar o Mem0.": "Não foi possível carregar o Mem0.",
   "Não foi possível salvar. Confira os campos e tente de novo.":
     "Não foi possível salvar. Confira os campos e tente de novo.",
@@ -2388,6 +2398,15 @@ const englishOverrides: Partial<Record<TranslationKey, string>> = {
   "Salvar Mem0": "Save Mem0",
   "Salvo.": "Saved.",
   "Conexão funcionando.": "Connection works.",
+  "Salve as alterações antes de testar a conexão.": "Save your changes before testing the connection.",
+  "Informe a URL do servidor.": "Enter the server URL.",
+  "Salve a chave da API primeiro.": "Save the API key first.",
+  "O Mem0 recusou a chave. Confira a chave e tente de novo.": "Mem0 rejected the key. Check the key and try again.",
+  "O Mem0 não respondeu a tempo. Tente de novo.": "Mem0 did not respond in time. Try again.",
+  "O servidor retornou uma resposta inválida. Confira a URL do Mem0.":
+    "The server returned an invalid response. Check the Mem0 URL.",
+  "Não foi possível conectar ao Mem0. Confira a conexão e a URL e tente de novo.":
+    "Could not connect to Mem0. Check your connection and the URL, then try again.",
   "Não foi possível carregar o Mem0.": "Could not load Mem0.",
   "Não foi possível salvar. Confira os campos e tente de novo.": "Could not save. Check the fields and try again.",
   "Com o Mem0 ligado, o texto das suas mensagens e das respostas deste bot vai para o Mem0 Cloud.":

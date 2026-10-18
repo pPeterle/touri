@@ -165,3 +165,37 @@ test("routine turns and disabled bots neither recall nor sync", async () => {
   await Bun.sleep(50)
   expect(f.seen).toEqual([])
 })
+
+test("canceling a turn also cancels recall before the provider starts", async () => {
+  const f = await fixture()
+  await f.api(`/bots/${f.bot.id}/mem0`, { enabled: true, apiKey: "m0-cancel-runtime" }, "PUT")
+  const mem0 = f.runtime.kernel.services.use("mem0.api")
+  if (!mem0) throw new Error("memory missing")
+  let signal: AbortSignal | undefined
+  let recalling = false
+  f.runtime.kernel.services.provide("mem0.api", {
+    ...mem0,
+    recall: async (args) => {
+      recalling = true
+      signal = args.signal
+      return new Promise<null>((resolve) => {
+        const timer = setTimeout(() => resolve(null), 1_000)
+        args.signal?.addEventListener(
+          "abort",
+          () => {
+            clearTimeout(timer)
+            resolve(null)
+          },
+          { once: true },
+        )
+      })
+    },
+  })
+  const { run } = f.send("Qual a minha cidade?")
+  await until(() => recalling)
+  f.engine.cancel(run.id)
+  expect(signal?.aborted).toBe(true)
+  await until(() => f.finished(run))
+  expect(f.turnInputs()).toEqual([])
+  expect(f.seen).toEqual([])
+})
